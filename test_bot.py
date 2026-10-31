@@ -22,12 +22,12 @@ PORT = int(os.getenv("PORT", 10000))
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# --- НОВЫЕ ТАРИФЫ С ВЫГОДОЙ И ЛИМИТАМИ ---
+# --- НОВЫЕ КОРОТКИЕ ТАРИФЫ (Чтобы влезало в кнопки) ---
 TARIFFS = {
-    "1m": ("1 месяц (до 3 устройств)", 200),
-    "3m": ("3 месяца (до 3 устройств) | Выгода 25%", 450),
-    "6m": ("6 месяцев (до 3 устройств) | Выгода 33%", 800),
-    "1y": ("1 год (до 5 устройств) | Выгода 42%", 1400),
+    "1m": ("1 мес · 3 устр.", 200),
+    "3m": ("3 мес · 3 устр. 🔥 -25%", 450),
+    "6m": ("6 мес · 3 устр. 🔥 -33%", 800),
+    "1y": ("1 год · 5 устр. 🔥 -42%", 1400),
 }
 
 # --- БАЗА ДАННЫХ ---
@@ -53,11 +53,10 @@ def init_db():
                             user_id INTEGER PRIMARY KEY)''')
         conn.commit()
         
-        # Безопасное добавление колонки consented, если таблица уже была создана
         try:
             conn.execute('ALTER TABLE users ADD COLUMN consented INTEGER DEFAULT 0')
         except sqlite3.OperationalError:
-            pass # Колонка уже существует
+            pass
 
 def is_admin(user_id):
     if user_id == ADMIN_ID: return True
@@ -183,7 +182,6 @@ async def start(msg: Message, command: CommandObject, state: FSMContext):
         await msg.answer("⛔️ Вы заблокированы в этом боте.")
         return
 
-    # Если пользователя нет в базе, показываем согласие
     if not user:
         consent_text = (
             "👋 Добро пожаловать в WeskVPN!\n\n"
@@ -197,7 +195,6 @@ async def start(msg: Message, command: CommandObject, state: FSMContext):
         await msg.answer(consent_text, parse_mode="HTML", reply_markup=consent_kb())
         return
 
-    # Если пользователь есть в базе (и уже дал согласие)
     ref_id = int(command.args) if command.args and command.args.isdigit() else None
     
     if ref_id and ref_id != msg.from_user.id:
@@ -213,8 +210,7 @@ async def start(msg: Message, command: CommandObject, state: FSMContext):
 # --- ОБРАБОТКА СОГЛАСИЯ ---
 @dp.callback_query(F.data == "consent_agree")
 async def consent_agree(cb: CallbackQuery, command: CommandObject = None):
-    # Если нажали кнопку, значит согласны
-    ref_id = None # Тут можно обработать рефку, но для простоты пропустим, т.к. это первый вход
+    ref_id = None
     add_user(cb.from_user.id, cb.from_user.username, ref_id)
     
     await cb.message.edit_text(
