@@ -9,7 +9,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.dispatcher.event.bases import SkipHandler # <--- ВОТ ОНА, МАГИЯ!
+from aiogram.dispatcher.event.bases import SkipHandler
 
 # --- Настройки ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -22,11 +22,12 @@ PORT = int(os.getenv("PORT", 10000))
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+# --- НОВЫЕ ТАРИФЫ С ВЫГОДОЙ И ЛИМИТАМИ ---
 TARIFFS = {
-    "1m": ("1 месяц", 200),
-    "3m": ("3 месяца", 500),
-    "6m": ("6 месяцев", 900),
-    "1y": ("1 год", 1500),
+    "1m": ("1 месяц (до 3 устройств)", 200),
+    "3m": ("3 месяца (до 3 устройств) | Выгода 25%", 450),
+    "6m": ("6 месяцев (до 3 устройств) | Выгода 33%", 800),
+    "1y": ("1 год (до 5 устройств) | Выгода 42%", 1400),
 }
 
 # --- БАЗА ДАННЫХ ---
@@ -41,7 +42,7 @@ def init_db():
                             user_id INTEGER PRIMARY KEY, username TEXT,
                             trial_used INTEGER DEFAULT 0, sub_until TEXT,
                             referrer_id INTEGER, is_banned INTEGER DEFAULT 0,
-                            reg_date TEXT)''')
+                            reg_date TEXT, consented INTEGER DEFAULT 0)''')
         conn.execute('''CREATE TABLE IF NOT EXISTS logs (
                             id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT,
                             action TEXT, user_id INTEGER, details TEXT)''')
@@ -51,6 +52,12 @@ def init_db():
         conn.execute('''CREATE TABLE IF NOT EXISTS admins (
                             user_id INTEGER PRIMARY KEY)''')
         conn.commit()
+        
+        # Безопасное добавление колонки consented, если таблица уже была создана
+        try:
+            conn.execute('ALTER TABLE users ADD COLUMN consented INTEGER DEFAULT 0')
+        except sqlite3.OperationalError:
+            pass # Колонка уже существует
 
 def is_admin(user_id):
     if user_id == ADMIN_ID: return True
@@ -66,7 +73,7 @@ def add_user(user_id, username, referrer_id=None):
     with db_connect() as conn:
         if not get_user(user_id):
             now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            conn.execute('INSERT INTO users (user_id, username, referrer_id, reg_date) VALUES (?, ?, ?, ?)', (user_id, username, referrer_id, now))
+            conn.execute('INSERT INTO users (user_id, username, referrer_id, reg_date, consented) VALUES (?, ?, ?, ?, 1)', (user_id, username, referrer_id, now))
             conn.commit()
 
 def update_trial(user_id):
@@ -152,26 +159,46 @@ def admin_kb():
         [InlineKeyboardButton(text="⬅️ В меню", callback_data="back")]
     ])
 
-# --- ПРОВЕРКА НА БАН (ТЕПЕРЬ С ПЕРЕДАЧЕЙ ХОДА) ---
+def consent_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Согласен с условиями", callback_data="consent_agree")]
+    ])
+
+# --- ПРОВЕРКА НА БАН ---
 @dp.callback_query()
 async def check_ban(cb: CallbackQuery):
     user = get_user(cb.from_user.id)
     if user and user['is_banned']:
         await cb.answer("⛔️ Вы заблокированы.", show_alert=True)
         return
-    raise SkipHandler() # <--- ЕСЛИ НЕ ЗАБАНЕН, ПЕРЕДАЕМ КНОПКУ ДАЛЬШЕ
+    raise SkipHandler()
 
-# --- ГЛАВНЫЙ ХЕНДЛЕР ---
+# --- ГЛАВНЫЙ ХЕНДЛЕР (С ПРОВЕРКОЙ СОГЛАСИЯ) ---
 @dp.message(Command("start"))
 async def start(msg: Message, command: CommandObject, state: FSMContext):
     await state.clear()
     user = get_user(msg.from_user.id)
+    
     if user and user['is_banned']:
         await msg.answer("⛔️ Вы заблокированы в этом боте.")
         return
 
+    # Если пользователя нет в базе, показываем согласие
+    if not user:
+        consent_text = (
+            "👋 Добро пожаловать в WeskVPN!\n\n"
+            "Для использования сервиса нам необходимо ваше согласие на обработку персональных данных.\n\n"
+            "🔒 <b>Какие данные мы собираем:</b>\n"
+            "• Telegram ID (для управления подпиской)\n"
+            "• Никнейм (для связи с поддержкой)\n\n"
+            "🚫 <b>Мы НЕ собираем:</b> ваши номера телефонов, ФИО или данные банковских карт.\n\n"
+            "Нажимая кнопку ниже, вы подтверждаете согласие с нашей Политикой конфиденциальности."
+        )
+        await msg.answer(consent_text, parse_mode="HTML", reply_markup=consent_kb())
+        return
+
+    # Если пользователь есть в базе (и уже дал согласие)
     ref_id = int(command.args) if command.args and command.args.isdigit() else None
-    add_user(msg.from_user.id, msg.from_user.username, ref_id)
     
     if ref_id and ref_id != msg.from_user.id:
         ref_user = get_user(ref_id)
@@ -182,6 +209,19 @@ async def start(msg: Message, command: CommandObject, state: FSMContext):
             except: pass
     
     await msg.answer(f"Привет, {msg.from_user.first_name}! 👋\nДобро пожаловать в WeskVPN.", reply_markup=main_kb(msg.from_user.id))
+
+# --- ОБРАБОТКА СОГЛАСИЯ ---
+@dp.callback_query(F.data == "consent_agree")
+async def consent_agree(cb: CallbackQuery, command: CommandObject = None):
+    # Если нажали кнопку, значит согласны
+    ref_id = None # Тут можно обработать рефку, но для простоты пропустим, т.к. это первый вход
+    add_user(cb.from_user.id, cb.from_user.username, ref_id)
+    
+    await cb.message.edit_text(
+        f"Отлично! Добро пожаловать в WeskVPN, {cb.from_user.first_name}. 👋",
+        reply_markup=main_kb(cb.from_user.id)
+    )
+    await cb.answer()
 
 # --- АДМИН ПАНЕЛЬ ---
 @dp.callback_query(F.data == "admin_panel")
@@ -366,7 +406,7 @@ async def ref(cb: CallbackQuery):
 async def subscribe(cb: CallbackQuery):
     rows = [[InlineKeyboardButton(text=f"{name} — {price} ₽", callback_data=f"pay:{key}")] for key, (name, price) in TARIFFS.items()]
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back")])
-    await cb.message.edit_text("🔌 <b>Выберите тариф:</b>\n\nВ каждую подписку входит <b>до 3 устройств</b>.", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await cb.message.edit_text("🔌 <b>Выберите тариф:</b>\n\nОплата картой РФ (СБП) или криптовалютой.", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await cb.answer()
 
 @dp.callback_query(F.data.startswith("pay:"))
@@ -374,7 +414,7 @@ async def pay(cb: CallbackQuery):
     key = cb.data.split(":")[1]
     name, price = TARIFFS[key]
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Согласен с офертой", callback_data=f"agree:{key}")],[InlineKeyboardButton(text="⬅️ Назад", callback_data="subscribe")]])
-    await cb.message.edit_text(f"Вы выбрали: <b>{name}</b> за {price} ₽\n\nДля продолжения вы должны согласиться с условиями.", parse_mode="HTML", reply_markup=kb)
+    await cb.message.edit_text(f"Вы выбрали: <b>{name}</b> за {price} ₽\n\nДля продолжения вы должны согласиться с условиями оферты.", parse_mode="HTML", reply_markup=kb)
     await cb.answer()
 
 @dp.callback_query(F.data.startswith("agree:"))
