@@ -29,7 +29,7 @@ def main_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👤 Профиль", callback_data="profile")],
         [InlineKeyboardButton(text="🔌 Подключить подписку", callback_data="subscribe")],
-        [InlineKeyboardButton(text="🎁 Пробный период — 5 дней", callback_data="trial")],
+        [InlineKeyboardButton(text="🎁 Пробный период — 3 дня", callback_data="trial")],
         [InlineKeyboardButton(text="ℹ️ Документы", callback_data="docs")],
         [InlineKeyboardButton(text="🆘 Поддержка", callback_data="support")],
     ])
@@ -72,7 +72,7 @@ async def support(cb: CallbackQuery):
     )
     await cb.answer()
 
-# --- Тарифы (обновлено до 3 устройств) ---
+# --- Тарифы ---
 @dp.callback_query(F.data == "subscribe")
 async def subscribe(cb: CallbackQuery):
     text = (
@@ -95,7 +95,23 @@ async def subscribe(cb: CallbackQuery):
     )
     await cb.answer()
 
-# --- Оплата (заглушка, пока ждем RollyPay) ---
+# --- Пробный период (3 дня) ---
+@dp.callback_query(F.data == "trial")
+async def trial(cb: CallbackQuery):
+    await cb.message.edit_text(
+        "🎁 <b>Пробный период на 3 дня активирован!</b>\n\n"
+        "🔗 Ваша тестовая ссылка для подключения:\n"
+        "<code>https://vpn.example.com/trial-demo-123</code>\n\n"
+        "Скачайте приложение Happ и вставьте эту ссылку. Если возникнут вопросы, пишите в поддержку.\n\n"
+        "<i>(Это тестовая версия. В боевой версии бот выдаст реальный ключ с вашего сервера)</i>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ В меню", callback_data="back")]
+        ])
+    )
+    await cb.answer()
+
+# --- Оплата (заглушка) ---
 @dp.callback_query(F.data.startswith("pay:"))
 async def pay(cb: CallbackQuery):
     key = cb.data.split(":")[1]
@@ -125,17 +141,6 @@ async def profile(cb: CallbackQuery):
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="💳 Оплатить", callback_data="subscribe")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]
-        ])
-    )
-    await cb.answer()
-
-# --- Пробный период ---
-@dp.callback_query(F.data == "trial")
-async def trial(cb: CallbackQuery):
-    await cb.message.edit_text(
-        "🎁 Заявка на пробный период принята (в разработке).",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]
         ])
     )
