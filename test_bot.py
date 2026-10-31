@@ -16,6 +16,7 @@ PORT = int(os.getenv("PORT", 10000))
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+# --- Тарифы ---
 TARIFFS = {
     "1m": ("1 месяц", 200),
     "3m": ("3 месяца", 500),
@@ -23,6 +24,7 @@ TARIFFS = {
     "1y": ("1 год", 1500),
 }
 
+# --- Клавиатуры ---
 def main_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👤 Профиль", callback_data="profile")],
@@ -37,7 +39,7 @@ def main_kb():
 async def start(msg: Message):
     await msg.answer(
         f"Привет, {msg.from_user.first_name}! 👋\n\n"
-        f"Добро пожаловать в наш VPN-бот.\nВыбери действие:",
+        f"Добро пожаловать в WeskVPN.\nВыбери действие:",
         reply_markup=main_kb()
     )
 
@@ -62,7 +64,7 @@ async def support(cb: CallbackQuery):
     await cb.message.edit_text(
         "🆘 <b>Служба поддержки</b>\n\n"
         "Если у вас возникли вопросы или проблемы с подключением, напишите нам:\n"
-        "👤 @wesksupport", # НЕ ЗАБУДЬ ЗАМЕНИТЬ НА СВОЙ НИК!
+        "👤 @wesksupport",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]
@@ -70,7 +72,30 @@ async def support(cb: CallbackQuery):
     )
     await cb.answer()
 
-# --- Оплата (пока заглушка) ---
+# --- Тарифы (обновлено до 5 устройств) ---
+@dp.callback_query(F.data == "subscribe")
+async def subscribe(cb: CallbackQuery):
+    text = (
+        "🔌 <b>Выберите тариф:</b>\n\n"
+        "📱 <i>Лимит устройств:</i>\n"
+        "В <b>каждый</b> тариф уже включена возможность подключить <b>до 5 устройств</b> (смартфон, компьютер, планшет и т.д.).\n\n"
+        "Одна подписка — вся ваша техника под защитой."
+    )
+    
+    rows = [[InlineKeyboardButton(
+        text=f"{name} — {price} ₽",
+        callback_data=f"pay:{key}"
+    )] for key, (name, price) in TARIFFS.items()]
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back")])
+    
+    await cb.message.edit_text(
+        text, 
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)
+    )
+    await cb.answer()
+
+# --- Оплата (заглушка, пока RollyPay не даст ключ) ---
 @dp.callback_query(F.data.startswith("pay:"))
 async def pay(cb: CallbackQuery):
     key = cb.data.split(":")[1]
@@ -78,7 +103,8 @@ async def pay(cb: CallbackQuery):
     
     await cb.message.edit_text(
         f"Вы выбрали тариф: <b>{name}</b>\n"
-        f"Сумма: <b>{price} ₽</b>\n\n"
+        f"Сумма: <b>{price} ₽</b>\n"
+        f"Устройств: <b>до 5</b>\n\n"
         f"⚙️ <i>Прием платежей временно настраивается. Скоро вы сможете оплатить этот тариф!</i>",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -87,7 +113,7 @@ async def pay(cb: CallbackQuery):
     )
     await cb.answer()
 
-# --- Остальные кнопки ---
+# --- Профиль ---
 @dp.callback_query(F.data == "profile")
 async def profile(cb: CallbackQuery):
     nick = f"@{cb.from_user.username}" if cb.from_user.username else "—"
@@ -104,16 +130,7 @@ async def profile(cb: CallbackQuery):
     )
     await cb.answer()
 
-@dp.callback_query(F.data == "subscribe")
-async def subscribe(cb: CallbackQuery):
-    rows = [[InlineKeyboardButton(
-        text=f"{name} — {price} ₽",
-        callback_data=f"pay:{key}"
-    )] for key, (name, price) in TARIFFS.items()]
-    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back")])
-    await cb.message.edit_text("Выберите тариф:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
-    await cb.answer()
-
+# --- Пробный период ---
 @dp.callback_query(F.data == "trial")
 async def trial(cb: CallbackQuery):
     await cb.message.edit_text(
@@ -124,6 +141,7 @@ async def trial(cb: CallbackQuery):
     )
     await cb.answer()
 
+# --- Назад ---
 @dp.callback_query(F.data == "back")
 async def back(cb: CallbackQuery):
     await cb.message.edit_text("Главное меню:", reply_markup=main_kb())
