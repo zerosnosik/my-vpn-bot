@@ -116,18 +116,18 @@ def get_stats():
         total_users = conn.execute('SELECT COUNT(*) FROM users').fetchone()[0]
         total_subs = conn.execute('SELECT COUNT(*) FROM users WHERE sub_until > ?', (datetime.datetime.now().isoformat(),)).fetchone()[0]
         total_money = conn.execute('SELECT SUM(amount) FROM payments').fetchone()[0] or 0
-        
         week_ago = (datetime.datetime.now() - datetime.timedelta(days=7)).isoformat()
         week_money = conn.execute('SELECT SUM(amount) FROM payments WHERE date > ?', (week_ago,)).fetchone()[0] or 0
         week_subs = conn.execute('SELECT COUNT(*) FROM payments WHERE date > ?', (week_ago,)).fetchone()[0]
-        
         return total_users, total_subs, total_money, week_money, week_subs
 
+# --- СОСТОЯНИЯ (FSM) ---
 class AdminStates(StatesGroup):
     waiting_broadcast = State()
     waiting_user_id = State()
     waiting_admin_id = State()
 
+# --- КЛАВИАТУРЫ ---
 def main_kb(user_id):
     keyboard = [
         [InlineKeyboardButton(text="👤 Профиль", callback_data="profile")],
@@ -151,6 +151,7 @@ def admin_kb():
         [InlineKeyboardButton(text="⬅️ В меню", callback_data="back")]
     ])
 
+# --- ПРОВЕРКА НА БАН ---
 @dp.callback_query()
 async def check_ban(cb: CallbackQuery):
     user = get_user(cb.from_user.id)
@@ -159,6 +160,7 @@ async def check_ban(cb: CallbackQuery):
         return True
     return False
 
+# --- ГЛАВНЫЙ ХЕНДЛЕР ---
 @dp.message(Command("start"))
 async def start(msg: Message, command: CommandObject, state: FSMContext):
     await state.clear()
@@ -180,15 +182,21 @@ async def start(msg: Message, command: CommandObject, state: FSMContext):
     
     await msg.answer(f"Привет, {msg.from_user.first_name}! 👋\nДобро пожаловать в WeskVPN.", reply_markup=main_kb(msg.from_user.id))
 
+# --- АДМИН ПАНЕЛЬ ---
 @dp.callback_query(F.data == "admin_panel")
 async def admin_panel(cb: CallbackQuery, state: FSMContext):
     await state.clear()
-    if not is_admin(cb.from_user.id): return
+    if not is_admin(cb.from_user.id): 
+        await cb.answer("Доступ запрещен", show_alert=True)
+        return
     await cb.message.edit_text("👑 <b>Админ-панель</b>\n\nВыбери действие:", parse_mode="HTML", reply_markup=admin_kb())
+    await cb.answer() # <--- ТА САМАЯ МАГИЯ
 
 @dp.callback_query(F.data == "admin_stats")
 async def admin_stats(cb: CallbackQuery):
-    if not is_admin(cb.from_user.id): return
+    if not is_admin(cb.from_user.id): 
+        await cb.answer("Доступ запрещен", show_alert=True)
+        return
     tu, ts, tm, wm, ws = get_stats()
     text = (f"📊 <b>Статистика</b>\n\n"
             f"👥 Всего юзеров: <b>{tu}</b>\n"
@@ -196,12 +204,13 @@ async def admin_stats(cb: CallbackQuery):
             f"💰 <b>Финансы:</b>\n"
             f"За всё время: <b>{tm} ₽</b>\n"
             f"За 7 дней: <b>{wm} ₽</b> ({ws} покупок)\n\n"
-            f"<i>(Кнопка симуляции покупки ниже нужна для теста)</i>")
+            f"<i>(Кнопка симуляции покупки ниже нужна для теста, пока нет RollyPay)</i>")
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🧪 Симулировать покупку (тест)", callback_data="admin_test_pay")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_panel")]
     ])
     await cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    await cb.answer() # <--- МАГИЯ
 
 @dp.callback_query(F.data == "admin_test_pay")
 async def admin_test_pay(cb: CallbackQuery):
@@ -237,6 +246,7 @@ async def admin_users(cb: CallbackQuery):
     kb_buttons.append([InlineKeyboardButton(text="⬅️ В админку", callback_data="admin_panel")])
     
     await cb.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_buttons))
+    await cb.answer() # <--- МАГИЯ
 
 @dp.callback_query(F.data == "admin_add")
 async def admin_add(cb: CallbackQuery, state: FSMContext):
@@ -245,6 +255,7 @@ async def admin_add(cb: CallbackQuery, state: FSMContext):
         return
     await state.set_state(AdminStates.waiting_admin_id)
     await cb.message.edit_text("🛡 Отправь ID пользователя, которого хочешь сделать админом.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="admin_panel")]]))
+    await cb.answer() # <--- МАГИЯ
 
 @dp.message(AdminStates.waiting_admin_id)
 async def process_admin_id(msg: Message, state: FSMContext):
@@ -259,11 +270,13 @@ async def process_admin_id(msg: Message, state: FSMContext):
     await state.clear()
     await msg.answer(f"✅ Пользователь <code>{new_admin}</code> теперь админ!", parse_mode="HTML", reply_markup=admin_kb())
 
+# --- УПРАВЛЕНИЕ ЮЗЕРОМ ---
 @dp.callback_query(F.data == "admin_find_user")
 async def admin_find_user(cb: CallbackQuery, state: FSMContext):
     if not is_admin(cb.from_user.id): return
     await state.set_state(AdminStates.waiting_user_id)
     await cb.message.edit_text("👤 Отправь мне <b>ID пользователя</b> (цифры).", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="admin_panel")]]))
+    await cb.answer() # <--- МАГИЯ
 
 @dp.message(AdminStates.waiting_user_id)
 async def process_user_id(msg: Message, state: FSMContext):
@@ -277,15 +290,12 @@ async def process_user_id(msg: Message, state: FSMContext):
 @dp.callback_query(F.data.startswith("adm_view:"))
 async def adm_view(cb: CallbackQuery):
     if not is_admin(cb.from_user.id): return
-    await show_user_card(cb.message, int(cb.data.split(":")[1]))
+    await show_user_card(cb, int(cb.data.split(":")[1]))
 
 async def show_user_card(message_obj, target_id):
     user = get_user(target_id)
     if not user:
-        if isinstance(message_obj, CallbackQuery):
-            await message_obj.message.answer("❌ Пользователь не найден.")
-        else:
-            await message_obj.answer("❌ Пользователь не найден.")
+        await message_obj.answer("❌ Пользователь не найден.")
         return
     ban = "⛔️ Забанен" if user['is_banned'] else "✅ Активен"
     sub = f"До {datetime.datetime.fromisoformat(user['sub_until']).strftime('%d.%m.%Y')}" if user['sub_until'] else "Нет"
@@ -300,6 +310,7 @@ async def show_user_card(message_obj, target_id):
     ])
     if isinstance(message_obj, CallbackQuery):
         await message_obj.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+        await message_obj.answer() # <--- МАГИЯ
     else:
         await message_obj.answer(text, parse_mode="HTML", reply_markup=kb)
 
@@ -319,12 +330,14 @@ async def adm_ban(cb: CallbackQuery):
     await cb.answer("✅ Статус изменен!", show_alert=True)
     await show_user_card(cb, target_id)
 
+# --- ОСТАЛЬНОЕ ---
 @dp.callback_query(F.data == "profile")
 async def profile(cb: CallbackQuery):
     if await check_ban(cb): return
     user = get_user(cb.from_user.id)
     sub = f"✅ До {datetime.datetime.fromisoformat(user['sub_until']).strftime('%d.%m.%Y')}" if user['sub_until'] else "❌ Не активна"
     await cb.message.edit_text(f"👤 <b>Профиль</b>\n\n🆔 ID: <code>{cb.from_user.id}</code>\n💎 Подписка: {sub}\n📱 Устройств: до 3", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]]))
+    await cb.answer()
 
 @dp.callback_query(F.data == "trial")
 async def trial(cb: CallbackQuery):
@@ -336,11 +349,13 @@ async def trial(cb: CallbackQuery):
     update_trial(cb.from_user.id)
     add_days(cb.from_user.id, 3)
     await cb.message.edit_text("🎁 <b>Пробный период на 3 дня активирован!</b>\n\n🔗 Ссылка: <code>https://vpn.example.com/trial</code>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]]))
+    await cb.answer()
 
 @dp.callback_query(F.data == "howto")
 async def howto(cb: CallbackQuery):
     if await check_ban(cb): return
     await cb.message.edit_text("📖 Скачайте Happ, скопируйте ссылку и вставьте в приложение.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]]))
+    await cb.answer()
 
 @dp.callback_query(F.data == "ref")
 async def ref(cb: CallbackQuery):
@@ -348,6 +363,7 @@ async def ref(cb: CallbackQuery):
     bot_info = await bot.get_me()
     ref_link = f"https://t.me/{bot_info.username}?start={cb.from_user.id}"
     await cb.message.edit_text(f"🤝 Пригласи друга:\n<code>{ref_link}</code>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]]))
+    await cb.answer()
 
 @dp.callback_query(F.data == "subscribe")
 async def subscribe(cb: CallbackQuery):
@@ -355,6 +371,7 @@ async def subscribe(cb: CallbackQuery):
     rows = [[InlineKeyboardButton(text=f"{name} — {price} ₽", callback_data=f"pay:{key}")] for key, (name, price) in TARIFFS.items()]
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back")])
     await cb.message.edit_text("🔌 <b>Выберите тариф:</b>\n\nВ каждую подписку входит <b>до 3 устройств</b>.", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await cb.answer()
 
 @dp.callback_query(F.data.startswith("pay:"))
 async def pay(cb: CallbackQuery):
@@ -363,29 +380,35 @@ async def pay(cb: CallbackQuery):
     name, price = TARIFFS[key]
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Согласен с офертой", callback_data=f"agree:{key}")],[InlineKeyboardButton(text="⬅️ Назад", callback_data="subscribe")]])
     await cb.message.edit_text(f"Вы выбрали: <b>{name}</b> за {price} ₽\n\nДля продолжения вы должны согласиться с условиями.", parse_mode="HTML", reply_markup=kb)
+    await cb.answer()
 
 @dp.callback_query(F.data.startswith("agree:"))
 async def agree(cb: CallbackQuery):
     if await check_ban(cb): return
     key = cb.data.split(":")[1]
     await cb.message.edit_text(f"💳 <b>Переход к оплате...</b>\n\n⚙️ <i>Прием платежей временно настраивается (ждем RollyPay).</i>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В меню", callback_data="back")]]))
+    await cb.answer()
 
 @dp.callback_query(F.data == "docs")
 async def docs(cb: CallbackQuery):
     if await check_ban(cb): return
     await cb.message.edit_text("ℹ️ <a href='https://telegra.ph/POLITIKA-KONFIDENCIALNOSTI-08-12-99'>Политика</a>\n📄 <a href='https://telegra.ph/PUBLICHNAYA-OFERTA-08-12-15'>Оферта</a>", parse_mode="HTML", disable_web_page_preview=True, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]]))
+    await cb.answer()
 
 @dp.callback_query(F.data == "support")
 async def support(cb: CallbackQuery):
     if await check_ban(cb): return
     await cb.message.edit_text("🆘 Поддержка: @wesksupport", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]]))
+    await cb.answer()
 
 @dp.callback_query(F.data == "back")
 async def back(cb: CallbackQuery, state: FSMContext):
     await state.clear()
     if await check_ban(cb): return
     await cb.message.edit_text("Главное меню:", reply_markup=main_kb(cb.from_user.id))
+    await cb.answer()
 
+# --- ЛОГИ И РАССЫЛКА ---
 @dp.callback_query(F.data == "admin_logs")
 async def admin_logs(cb: CallbackQuery):
     if not is_admin(cb.from_user.id): return
@@ -394,12 +417,14 @@ async def admin_logs(cb: CallbackQuery):
     for log in logs:
         text += f"[{log['timestamp']}] {log['action']} (ID: {log['user_id']})\n{log['details']}\n\n"
     await cb.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_panel")]]))
+    await cb.answer()
 
 @dp.callback_query(F.data == "admin_broadcast")
 async def admin_broadcast(cb: CallbackQuery, state: FSMContext):
     if not is_admin(cb.from_user.id): return
     await state.set_state(AdminStates.waiting_broadcast)
     await cb.message.edit_text("📢 Отправь мне текст для рассылки.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="admin_panel")]]))
+    await cb.answer()
 
 @dp.message(AdminStates.waiting_broadcast)
 async def process_broadcast(msg: Message, state: FSMContext):
@@ -417,6 +442,7 @@ async def process_broadcast(msg: Message, state: FSMContext):
         except: failed += 1
     await msg.answer(f"✅ Доставлено: {success}\n🚫 Ошибок: {failed}", parse_mode="HTML", reply_markup=admin_kb())
 
+# --- ЗАПУСК ---
 async def on_startup(bot: Bot):
     init_db()
     if WEBHOOK_URL:
