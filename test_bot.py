@@ -5,10 +5,11 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+from rollypay import RollyPayClient, RollyPayError
 
-# Берем токен из настроек Render (переменная окружения)
+# --- Настройки ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-# Render сам подставит сюда адрес твоего сайта
+ROLLYPAY_API_KEY = os.getenv("ROLLYPAY_API_KEY")
 WEBHOOK_HOST = os.getenv("RENDER_EXTERNAL_URL")
 WEBHOOK_PATH = "/webhook"
 WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}" if WEBHOOK_HOST else None
@@ -16,6 +17,11 @@ PORT = int(os.getenv("PORT", 10000))
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+
+if ROLLYPAY_API_KEY:
+    rolly_client = RollyPayClient(api_key=ROLLYPAY_API_KEY)
+else:
+    rolly_client = None
 
 TARIFFS = {
     "1m": ("1 месяц", 200),
@@ -30,16 +36,91 @@ def main_kb():
         [InlineKeyboardButton(text="🔌 Подключить подписку", callback_data="subscribe")],
         [InlineKeyboardButton(text="🎟 Промокод", callback_data="promo")],
         [InlineKeyboardButton(text="🎁 Пробный период — 5 дней", callback_data="trial")],
+        [InlineKeyboardButton(text="ℹ️ Документы", callback_data="docs")],
+        [InlineKeyboardButton(text="🆘 Поддержка", callback_data="support")],
     ])
 
+# --- Главное меню ---
 @dp.message(Command("start"))
 async def start(msg: Message):
     await msg.answer(
         f"Привет, {msg.from_user.first_name}! 👋\n\n"
-        f"Это тестовая версия VPN-бота.\nВыбери действие:",
+        f"Это VPN-бот. Выбери действие:",
         reply_markup=main_kb()
     )
 
+# --- Документы ---
+@dp.callback_query(F.data == "docs")
+async def docs(cb: CallbackQuery):
+    text = (
+        "<b>Документация</b>\n\n"
+        "📄 <a href='https://telegra.ph/POLITIKA-KONFIDENCIALNOSTI-08-12-99'>Политика конфиденциальности</a>\n\n"
+        "📄 <a href='https://telegra.ph/PUBLICHNAYA-OFERTA-08-12-15'>Пользовательское соглашение</a>"
+    )
+    await cb.message.edit_text(text, parse_mode="HTML", disable_web_page_preview=True,
+                               reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                   [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]
+                               ]))
+    await cb.answer()
+
+# --- Поддержка ---
+@dp.callback_query(F.data == "support")
+async def support(cb: CallbackQuery):
+    await cb.message.edit_text(
+        "🆘 <b>Служба поддержки</b>\n\n"
+        "Если у вас возникли вопросы, напишите нам:\n"
+        "👤 @creator_of_worldd", # ЗАМЕНИ НА СВОЙ НИК
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]
+        ])
+    )
+    await cb.answer()
+
+# --- Оплата ---
+@dp.callback_query(F.data.startswith("pay:"))
+async def pay(cb: CallbackQuery):
+    key = cb.data.split(":")[1]
+    name, price = TARIFFS[key]
+    
+    if not rolly_client:
+        await cb.message.edit_text("❌ Ошибка: RollyPay не настроен (нет API ключа).",
+                                   reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                       [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]
+                                   ]))
+        await cb.answer()
+        return
+
+    try:
+        # Создаем платеж
+        payment = rolly_client.payments.create(
+            amount=f"{price}.00",
+            order_id=f"vpn_{cb.from_user.id}_{key}",
+            description=f"Оплата VPN «{name}»",
+            payment_method="sbp",
+            redirect_url="https://t.me/your_bot_username"
+        )
+        
+        pay_url = payment["pay_url"]
+        
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="💳 Перейти к оплате", url=pay_url)],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]
+        ])
+        
+        await cb.message.edit_text(
+            f"Вы выбрали тариф: <b>{name}</b>\n"
+            f"Сумма к оплате: <b>{price} ₽</b>\n\n"
+            f"Нажмите кнопку ниже для перехода к оплате.",
+            parse_mode="HTML",
+            reply_markup=kb
+        )
+    except RollyPayError as e:
+        await cb.message.edit_text(f"Ошибка при создании платежа: {e}")
+    
+    await cb.answer()
+
+# --- Остальные кнопки (профиль, тарифы и т.д. — как было) ---
 @dp.callback_query(F.data == "profile")
 async def profile(cb: CallbackQuery):
     nick = f"@{cb.from_user.username}" if cb.from_user.username else "—"
@@ -63,30 +144,13 @@ async def subscribe(cb: CallbackQuery):
         callback_data=f"pay:{key}"
     )] for key, (name, price) in TARIFFS.items()]
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back")])
-    await cb.message.edit_text(
-        "Выберите тариф:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)
-    )
-    await cb.answer()
-
-@dp.callback_query(F.data.startswith("pay:"))
-async def pay(cb: CallbackQuery):
-    key = cb.data.split(":")[1]
-    name, price = TARIFFS[key]
-    await cb.message.edit_text(
-        f"✅ Тест: выбран тариф «{name}» на {price} ₽.\n\n"
-        f"Это тестовая версия — реальная оплата будет позже.",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]
-        ])
-    )
+    await cb.message.edit_text("Выберите тариф:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await cb.answer()
 
 @dp.callback_query(F.data == "promo")
 async def promo(cb: CallbackQuery):
     await cb.message.edit_text(
-        "🎟 Тест: промокод WELCOME3 дал бы 3 дня бесплатно.\n"
-        "(В боевой версии здесь будет форма ввода кода)",
+        "🎟 Введите промокод в чат:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]
         ])
@@ -96,9 +160,7 @@ async def promo(cb: CallbackQuery):
 @dp.callback_query(F.data == "trial")
 async def trial(cb: CallbackQuery):
     await cb.message.edit_text(
-        "🎁 Тест: пробный период на 5 дней активирован!\n\n"
-        "🔗 Ссылка (демо): <code>https://vpn.example.com/demo-123</code>",
-        parse_mode="HTML",
+        "🎁 Заявка на пробный период принята (в разработке).",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]
         ])
@@ -110,6 +172,7 @@ async def back(cb: CallbackQuery):
     await cb.message.edit_text("Главное меню:", reply_markup=main_kb())
     await cb.answer()
 
+# --- Webhook настройки ---
 async def on_startup(bot: Bot):
     if WEBHOOK_URL:
         await bot.set_webhook(WEBHOOK_URL)
@@ -120,7 +183,6 @@ async def main():
     webhook_requests_handler.register(app, path=WEBHOOK_PATH)
     setup_application(app, dp, bot=bot)
 
-    # Роут для проверки, что бот жив (его будет дергать UptimeRobot)
     async def health_check(request):
         return web.Response(text="Bot is alive!")
     app.router.add_get("/", health_check)
@@ -139,3 +201,4 @@ if __name__ == "__main__":
         print("Ошибка: переменная BOT_TOKEN не найдена!")
     else:
         asyncio.run(main())
+        
