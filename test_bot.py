@@ -11,6 +11,7 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.dispatcher.event.bases import SkipHandler
+from aiogram.types import ErrorEvent  
 
 # --- Настройки ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -194,15 +195,18 @@ def consent_kb():
 
 # --- ГЛОБАЛЬНЫЙ ЛОВЕЦ ОШИБОК ---
 @dp.error()
-async def error_handler(event: Union[Message, CallbackQuery], exception: Exception):
+async def error_handler(event: ErrorEvent):
+    exception = event.exception
     error_details = f"Тип: {type(exception).__name__}\nТекст: {str(exception)}"
+    
+    # Вызываем НАШУ СРОЧНУЮ функцию с капсом
     await notify_urgent("ОШИБКА В БОТЕ", error_details)
     
-    if isinstance(event, CallbackQuery):
+    # Если ошибка произошла при нажатии кнопки, убираем "часики" у клиента
+    if event.update.callback_query:
         try:
-            await event.answer("Произошла техническая ошибка. Мы уже чиним!", show_alert=True)
+            await event.update.callback_query.answer("Произошла техническая ошибка. Мы уже чиним!", show_alert=True)
         except: pass
-
 # --- ПРОВЕРКА НА БАН ---
 @dp.callback_query()
 async def check_ban(cb: CallbackQuery):
