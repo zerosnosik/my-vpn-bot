@@ -120,7 +120,7 @@ async def create_vpn_client(user_id, devices, days):
         }
 
         try:
-            async with session.post(f"{base_url}/panel/api/clients/add", headers=headers, json=client_data) as resp:
+            async with session.post(f"{base_url}/panel/api/inbounds/addClient", headers=headers, json=client_data) as resp:
                 if resp.status == 200:
                     res_json = await resp.json()
                     if not res_json.get("success"):
