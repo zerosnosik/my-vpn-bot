@@ -5,6 +5,8 @@ import asyncpg
 import hmac
 import hashlib
 import json
+import time
+import uuid
 from typing import Union
 from aiohttp import web, ClientSession
 from aiogram import Bot, Dispatcher, F
@@ -24,6 +26,9 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 ROLLYPAY_API_KEY = os.getenv("ROLLYPAY_API_KEY")
 ROLLYPAY_TERMINAL_ID = os.getenv("ROLLYPAY_TERMINAL_ID")
 ROLLYPAY_SIGNING_SECRET = os.getenv("ROLLYPAY_SIGNING_SECRET")
+XUI_URL = os.getenv("XUI_URL")
+XUI_USERNAME = os.getenv("XUI_USERNAME")
+XUI_PASSWORD = os.getenv("XUI_PASSWORD")
 WEBHOOK_HOST = os.getenv("RENDER_EXTERNAL_URL")
 WEBHOOK_PATH = "/webhook"
 WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}" if WEBHOOK_HOST else None
@@ -34,9 +39,9 @@ notify_bot = Bot(token=NOTIFY_BOT_TOKEN) if NOTIFY_BOT_TOKEN else bot
 dp = Dispatcher()
 db_pool = None 
 
-# --- МАТРИЦА ТАРИФОВ (Не забудь потом поменять 10 на 200!) ---
+# --- МАТРИЦА ТАРИФОВ (Оставил тестовый за 10₽) ---
 TARIFFS = {
-    "3_1m": ("1 мес · 3 устр.", 200, 3), 
+    "3_1m": ("1 мес · 3 устр. (ТЕСТ 10₽)", 10, 3), 
     "3_3m": ("3 мес · 3 устр. 🔥 -25%", 450, 3),
     "3_6m": ("6 мес · 3 устр. 🔥 -33%", 800, 3), 
     "3_1y": ("1 год · 3 устр. 🔥 -42%", 1400, 3),
@@ -55,23 +60,118 @@ async def notify_payment_success(nick, user_id, tariff, price, devices):
     text = (
         f"👑 <b>ПОЗДРАВЛЯЮ, БОСС!</b> 🎉\n\n"
         f"👤 Клиент: <b>{nick}</b> (ID: <code>{user_id}</code>)\n"
-        f"💎 Купил у вас подписку на <b>{tariff}</b>!\n"
+        f"💎 Купил подписку: <b>{tariff}</b>\n"
         f"📱 Устройств: <b>{devices}</b>\n"
         f"💰 Сумма: <b>{price} ₽</b>\n\n"
-        f"📈 <i>WeskVPN становится только сильнее. Так держать!</i>"
+        f"📈 <i>WeskVPN растет!</i>"
     )
     try: await notify_bot.send_message(ADMIN_ID, text, parse_mode="HTML")
-    except Exception as e: print(f"Ошибка отправки уведомления админу: {e}")
+    except: pass
 
 async def notify_urgent(title: str, details: str):
-    text = (
-        f"🚨🚨🚨 <b>СРОЧНОЕ УВЕДОМЛЕНИЕ!</b> 🚨🚨🚨\n\n"
-        f"⚠️ <b>{title.upper()}</b> ⚠️\n\n"
-        f"📝 <b>ДЕТАЛИ:</b>\n<code>{details[:300]}</code>\n\n"
-        f"🛠 <i>ТРЕБУЕТСЯ ТВОЕ ВНИМАНИЕ!</i>"
-    )
+    text = f"🚨 <b>ОШИБКА: {title.upper()}</b> 🚨\n\n<code>{details[:300]}</code>"
     try: await notify_bot.send_message(ADMIN_ID, text, parse_mode="HTML")
-    except Exception: pass
+    except: pass
+
+# --- ИНТЕГРАЦИЯ С 3X-UI ---
+async def create_vpn_client(user_id, devices):
+    """Авторизуется в 3x-ui и создает клиента, возвращает ссылку"""
+    if not XUI_URL or not XUI_USERNAME or not XUI_PASSWORD:
+        return None
+
+    base_url = XUI_URL.rstrip('/')
+    
+    # 1. Авторизация
+    login_url = f"{base_url}/login"
+    login_data = {"username": XUI_USERNAME, "password": XUI_PASSWORD}
+    
+    async with ClientSession() as session:
+        try:
+            async with session.post(login_url, json=login_data) as resp:
+                if resp.status != 200:
+                    await notify_urgent("3x-ui Login Error", f"Status: {resp.status}")
+                    return None
+                # Куки сохраняются в сессии автоматически
+        except Exception as e:
+            await notify_urgent("3x-ui Connection Error", str(e))
+            return None
+
+        # 2. Получаем список инбаундов, чтобы найти ID первого (VLESS TCP)
+        try:
+            async with session.get(f"{base_url}/panel/api/inbounds/list") as resp:
+                data = await resp.json()
+                if not data.get("success"):
+                    return None
+                
+                inbounds = data.get("obj", [])
+                if not inbounds:
+                    await notify_urgent("3x-ui Error", "Нет созданных Inbounds!")
+                    return None
+                
+                # Берем первый инбаунд (обычно это TCP Reality)
+                target_inbound = inbounds[0]
+                inbound_id = target_inbound["id"]
+                protocol = target_inbound["protocol"]
+                port = target_inbound["port"]
+                remark = target_inbound["remark"] # Название (WeskVPN | Германия)
+        except Exception as e:
+            await notify_urgent("3x-ui Get Inbounds Error", str(e))
+            return None
+
+        # 3. Создаем клиента
+        client_uuid = str(uuid.uuid4())
+        email = f"user_{user_id}"
+        expiry_time = int((time.time() + 30 * 24 * 60 * 60) * 1000) # +30 дней
+        total_gb = 0 # 0 = безлимит
+        limit_ip = devices # Количество устройств
+
+        client_data = {
+            "id": inbound_id,
+            "settings": json.dumps({
+                "clients": [{
+                    "id": client_uuid,
+                    "flow": "xtls-rprx-vision",
+                    "email": email,
+                    "limitIp": limit_ip,
+                    "totalGB": total_gb,
+                    "expiryTime": expiry_time,
+                    "enable": True,
+                    "tgId": str(user_id),
+                    "subId": client_uuid[:16],
+                    "reset": 0
+                }]
+            })
+        }
+
+        try:
+            async with session.post(f"{base_url}/panel/api/inbounds/addClient", json=client_data) as resp:
+                if resp.status == 200:
+                    # Формируем ссылку для подключения
+                    # Берем данные для Reality из настроек инбаунда
+                    stream_settings = json.loads(target_inbound["streamSettings"])
+                    reality_settings = stream_settings.get("realitySettings", {})
+                    server_names = reality_settings.get("serverNames", [])
+                    public_key = reality_settings.get("settings", {}).get("publicKey", "")
+                    short_id = reality_settings.get("shortIds", [""])[0]
+                    fingerprint = reality_settings.get("settings", {}).get("fingerprint", "chrome")
+                    
+                    # Получаем домен/IP сервера из XUI_URL
+                    server_host = base_url.replace("https://", "").replace("http://", "").split(":")[0]
+
+                    vless_link = (
+                        f"vless://{client_uuid}@{server_host}:{port}"
+                        f"?type=tcp&security=reality&pbk={public_key}&fp={fingerprint}"
+                        f"&sni={server_names[0] if server_names else ''}&sid={short_id}&spx=%2F&flow=xtls-rprx-vision"
+                        f"#{remark}-{email}"
+                    )
+                    return vless_link
+                else:
+                    error = await resp.text()
+                    await notify_urgent("3x-ui Add Client Error", error)
+                    return None
+        except Exception as e:
+            await notify_urgent("3x-ui Add Client Exception", str(e))
+            return None
 
 # --- БАЗА ДАННЫХ ---
 async def init_db():
@@ -115,10 +215,6 @@ async def add_days(user_id, days, devices=3):
     async with db_pool.acquire() as conn: await conn.execute('UPDATE users SET sub_until = $1, devices_limit = $2 WHERE user_id = $3', new_until.isoformat(), devices, user_id)
     await add_log("SUB_ADD", user_id, f"Выдано {days} дней, {devices} устройств")
 
-async def toggle_ban(user_id, ban_status):
-    async with db_pool.acquire() as conn: await conn.execute('UPDATE users SET is_banned = $1 WHERE user_id = $2', ban_status, user_id)
-    await add_log("BAN" if ban_status else "UNBAN", user_id, "Забанен" if ban_status else "Разбанен")
-
 async def add_log(action, user_id, details):
     async with db_pool.acquire() as conn:
         now = datetime.datetime.now().strftime("%d.%m.%Y %H:%M")
@@ -137,15 +233,12 @@ async def get_stats():
         total_users = await conn.fetchval('SELECT COUNT(*) FROM users')
         total_subs = await conn.fetchval('SELECT COUNT(*) FROM users WHERE sub_until > $1', datetime.datetime.now().isoformat())
         total_money = await conn.fetchval('SELECT SUM(amount) FROM payments') or 0
-        week_ago = (datetime.datetime.now() - datetime.timedelta(days=7)).isoformat()
-        week_money = await conn.fetchval('SELECT SUM(amount) FROM payments WHERE date > $1', week_ago) or 0
-        return total_users, total_subs, total_money, week_money, 0
+        return total_users, total_subs, total_money
 
 # --- СОСТОЯНИЯ (FSM) ---
 class AdminStates(StatesGroup):
     waiting_broadcast = State()
     waiting_user_id = State()
-    waiting_admin_id = State()
 
 # --- КЛАВИАТУРЫ ---
 async def main_kb(user_id):
@@ -162,20 +255,19 @@ async def main_kb(user_id):
 
 def admin_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 Статистика и Деньги", callback_data="admin_stats")],
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
         [InlineKeyboardButton(text="👥 Список юзеров", callback_data="admin_users:0")],
-        [InlineKeyboardButton(text="👤 Найти юзера по ID", callback_data="admin_find_user")],
+        [InlineKeyboardButton(text="👤 Найти юзера", callback_data="admin_find_user")],
         [InlineKeyboardButton(text="📝 Логи", callback_data="admin_logs"), InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
-        [InlineKeyboardButton(text="🛡 Добавить админа", callback_data="admin_add")],
         [InlineKeyboardButton(text="⬅️ В меню", callback_data="back")]
     ])
 
-def consent_kb(): return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Согласен с условиями", callback_data="consent_agree")]])
+def consent_kb(): return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Согласен", callback_data="consent_agree")]])
 def devices_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📱 3 устройства (Базовый)", callback_data="dev_3")],
-        [InlineKeyboardButton(text="📱 6 устройств (Семейный)", callback_data="dev_6")],
-        [InlineKeyboardButton(text="📱 9 устройств (Максимум)", callback_data="dev_9")],
+        [InlineKeyboardButton(text="📱 3 устройства", callback_data="dev_3")],
+        [InlineKeyboardButton(text="📱 6 устройств", callback_data="dev_6")],
+        [InlineKeyboardButton(text="📱 9 устройств", callback_data="dev_9")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]
     ])
 
@@ -183,29 +275,20 @@ def devices_kb():
 @dp.error()
 async def error_handler(event: ErrorEvent):
     exception = event.exception
-    await notify_urgent("ОШИБКА В БОТЕ", f"Тип: {type(exception).__name__}\nТекст: {str(exception)}")
+    await notify_urgent("ОШИБКА В БОТЕ", f"{type(exception).__name__}: {str(exception)}")
     if event.update.callback_query:
         try: await event.update.callback_query.answer("Техническая ошибка. Мы чиним!", show_alert=True)
         except: pass
-
-# --- ПРОВЕРКА НА БАН ---
-@dp.callback_query()
-async def check_ban(cb: CallbackQuery):
-    user = await get_user(cb.from_user.id)
-    if user and user['is_banned']:
-        await cb.answer("⛔️ Вы заблокированы.", show_alert=True)
-        return
-    raise SkipHandler()
 
 # --- ГЛАВНЫЙ ХЕНДЛЕР ---
 @dp.message(Command("start"))
 async def start(msg: Message, command: CommandObject, state: FSMContext):
     await state.clear()
     user = await get_user(msg.from_user.id)
-    if user and user['is_banned']: return await msg.answer("⛔️ Вы заблокированы в этом боте.")
+    if user and user['is_banned']: return await msg.answer("⛔️ Вы заблокированы.")
 
     if not user:
-        consent_text = "👋 Добро пожаловать в WeskVPN!\n\nДля работы нам нужны ваши Telegram ID и Никнейм.\n🚫 Мы НЕ собираем номера телефонов или данные карт.\n\nНажимая кнопку, вы соглашаетесь с Политикой конфиденциальности."
+        consent_text = "👋 Добро пожаловать в WeskVPN!\n\nДля работы нам нужны ваши Telegram ID и Никнейм.\n🚫 Мы НЕ собираем номера телефонов.\n\nНажимая кнопку, вы соглашаетесь с Политикой конфиденциальности."
         return await msg.answer(consent_text, parse_mode="HTML", reply_markup=consent_kb())
 
     ref_id = int(command.args) if command.args and command.args.isdigit() else None
@@ -224,7 +307,44 @@ async def consent_agree(cb: CallbackQuery):
     await cb.message.edit_text(f"Отлично! Добро пожаловать в WeskVPN, {cb.from_user.first_name}. 👋", reply_markup=await main_kb(cb.from_user.id))
     await cb.answer()
 
-# --- ВЫБОР УСТРОЙСТВ И ТАРИФЫ ---
+# --- ПОЛЬЗОВАТЕЛЬСКИЕ КНОПКИ ---
+@dp.callback_query(F.data == "profile")
+async def profile(cb: CallbackQuery):
+    user = await get_user(cb.from_user.id)
+    sub = f"✅ До {datetime.datetime.fromisoformat(user['sub_until']).strftime('%d.%m.%Y')}" if user['sub_until'] else "❌ Не активна"
+    await cb.message.edit_text(f"👤 <b>Профиль</b>\n\n🆔 ID: <code>{cb.from_user.id}</code>\n💎 Подписка: {sub}\n📱 Устройств: {user['devices_limit']}", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]]))
+    await cb.answer()
+
+@dp.callback_query(F.data == "trial")
+async def trial(cb: CallbackQuery):
+    user = await get_user(cb.from_user.id)
+    if user['trial_used'] == 1: return await cb.answer("❌ Вы уже использовали пробник!", show_alert=True)
+    
+    await cb.message.edit_text("⏳ Создаем ключ...")
+    
+    # Создаем реальный ключ на 3 дня и 3 устройства
+    vless_link = await create_vpn_client(cb.from_user.id, 3)
+    if not vless_link:
+        return await cb.message.edit_text("❌ Ошибка сервера. Мы уже чиним!")
+        
+    await update_trial(cb.from_user.id)
+    await add_days(cb.from_user.id, 3, devices=3)
+    await cb.message.edit_text(f"🎁 <b>Пробный период активирован!</b>\n\n🔗 Ваша ссылка:\n<code>{vless_link}</code>\n\nСкопируйте её и вставьте в Happ.", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]]))
+    await cb.answer()
+
+@dp.callback_query(F.data == "howto")
+async def howto(cb: CallbackQuery):
+    text = "📖 <b>Как подключиться?</b>\n\n1️⃣ Скачайте <b>Happ</b>.\n2️⃣ Скопируйте ссылку-ключ.\n3️⃣ Вставьте в Happ."
+    keyboard = [[InlineKeyboardButton(text="🍏 iOS", url="https://apps.apple.com/us/app/happ-proxy-utility/id6504287215")],[InlineKeyboardButton(text="🤖 Android", url="https://github.com/Happ-proxy/happ-android/releases/latest/download/Happ.apk")],[InlineKeyboardButton(text="💻 Windows", url="https://github.com/Happ-proxy/happ-desktop/releases")],[InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]]
+    await cb.message.edit_text(text, parse_mode="HTML", disable_web_page_preview=True, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+    await cb.answer()
+
+@dp.callback_query(F.data == "ref")
+async def ref(cb: CallbackQuery):
+    bot_info = await bot.get_me()
+    await cb.message.edit_text(f"🤝 Пригласи друга:\n<code>https://t.me/{bot_info.username}?start={cb.from_user.id}</code>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]]))
+    await cb.answer()
+
 @dp.callback_query(F.data == "subscribe")
 async def subscribe(cb: CallbackQuery):
     await cb.message.edit_text("📱 <b>Сколько устройств вы хотите подключить?</b>", parse_mode="HTML", reply_markup=devices_kb())
@@ -238,33 +358,43 @@ async def show_tariffs(cb: CallbackQuery):
     await cb.message.edit_text(f"🔌 <b>Тарифы для {dev_count} устройств:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await cb.answer()
 
-# --- ОПЛАТА (ИНТЕГРАЦИЯ ROLLYPAY) ---
 @dp.callback_query(F.data.startswith("pay:"))
 async def pay(cb: CallbackQuery):
     key = cb.data.split(":")[1]
     name, price, devices = TARIFFS[key]
-    
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Согласен с офертой", callback_data=f"agree:{key}")],[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"dev_{devices}")]])
+    await cb.message.edit_text(f"Вы выбрали: <b>{name}</b>\nСумма: <b>{price} ₽</b>\n\nСогласны с офертой?", parse_mode="HTML", reply_markup=kb)
+    await cb.answer()
+
+@dp.callback_query(F.data == "docs")
+async def docs(cb: CallbackQuery):
+    await cb.message.edit_text("ℹ️ <a href='https://telegra.ph/POLITIKA-KONFIDENCIALNOSTI-08-12-99'>Политика</a>\n📄 <a href='https://telegra.ph/PUBLICHNAYA-OFERTA-08-12-15'>Оферта</a>", parse_mode="HTML", disable_web_page_preview=True, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]]))
+    await cb.answer()
+
+@dp.callback_query(F.data == "support")
+async def support(cb: CallbackQuery):
+    await cb.message.edit_text("🆘 Поддержка: @wesksupport", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]]))
+    await cb.answer()
+
+@dp.callback_query(F.data == "back")
+async def back(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await cb.message.edit_text("Главное меню:", reply_markup=await main_kb(cb.from_user.id))
+    await cb.answer()
+
+# --- ОПЛАТА ---
+@dp.callback_query(F.data.startswith("agree:"))
+async def agree(cb: CallbackQuery):
+    key = cb.data.split(":")[1]
+    name, price, devices = TARIFFS[key]
     await cb.message.edit_text("⏳ <b>Создаем ссылку на оплату...</b>", parse_mode="HTML")
-    
     nonce = str(int(datetime.datetime.now().timestamp() * 1000))
-    
-    headers = {
-        "X-API-Key": ROLLYPAY_API_KEY,
-        "X-Nonce": nonce,
-        "Content-Type": "application/json"
-    }
-    
+    headers = {"X-API-Key": ROLLYPAY_API_KEY, "X-Nonce": nonce, "Content-Type": "application/json"}
     payload = {
-        "terminal_id": ROLLYPAY_TERMINAL_ID,
-        "amount": f"{price}.00",
-        "payment_currency": "RUB",
-        "order_id": f"user:{cb.from_user.id}:tariff:{key}",
-        "description": f"VPN {name}",
-        "payment_method": "sbp", 
-        "customer_id": str(cb.from_user.id),
-        "redirect_url": "https://t.me/weskvpn_bot"
+        "terminal_id": ROLLYPAY_TERMINAL_ID, "amount": f"{price}.00", "payment_currency": "RUB",
+        "order_id": f"user:{cb.from_user.id}:tariff:{key}", "description": f"VPN {name}",
+        "payment_method": "sbp", "customer_id": str(cb.from_user.id), "redirect_url": "https://t.me/weskvpn_bot"
     }
-    
     try:
         async with ClientSession() as session:
             async with session.post("https://api.rollypay.io/api/v1/payments", headers=headers, json=payload) as response:
@@ -272,33 +402,23 @@ async def pay(cb: CallbackQuery):
                     data = await response.json()
                     pay_url = data.get("pay_url")
                     if pay_url:
-                        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💳 Оплатить (СБП)", url=pay_url)],[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back")]])
-                        # Изменили текст: добавили согласие с офертой прямо в сообщение
-                        await cb.message.edit_text(
-                            f"Тариф: <b>{name}</b>\n"
-                            f"Сумма: <b>{price} ₽</b>\n\n"
-                            f"<i>Нажимая кнопку ниже, вы соглашаетесь с условиями оферты.</i>", 
-                            parse_mode="HTML", reply_markup=kb
-                        )
-                    else:
-                        await cb.message.edit_text("❌ Ошибка: RollyPay не вернул ссылку.")
+                        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💳 Перейти к оплате", url=pay_url)],[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back")]])
+                        await cb.message.edit_text(f"Тариф: <b>{name}</b>\nСумма: <b>{price} ₽</b>\n\nНажмите кнопку ниже для оплаты.", parse_mode="HTML", reply_markup=kb)
+                    else: await cb.message.edit_text("❌ Ошибка: RollyPay не вернул ссылку.")
                 else:
                     error_text = await response.text()
                     await notify_urgent("Ошибка RollyPay API", f"Код: {response.status}\n{error_text}")
-                    await cb.message.edit_text(f"❌ Ошибка платежной системы. Попробуйте позже.")
+                    await cb.message.edit_text(f"❌ Ошибка платежной системы.")
     except Exception as e:
         await notify_urgent("Критическая ошибка RollyPay", str(e))
-        await cb.message.edit_text("❌ Ошибка соединения с платежной системой.")
-    
+        await cb.message.edit_text("❌ Ошибка соединения.")
     await cb.answer()
 
 # --- ВЕБХУК ROLLYPAY ---
 async def rollypay_webhook(request: web.Request):
     try:
         raw_body = await request.read()
-        body_text = raw_body.decode('utf-8')
-        
-        data = json.loads(body_text)
+        data = json.loads(raw_body.decode('utf-8'))
         event_type = data.get("event_type")
         status = data.get("status")
         order_id = data.get("order_id", "")
@@ -314,24 +434,27 @@ async def rollypay_webhook(request: web.Request):
                     days_map = {"1m": 30, "3m": 90, "6m": 180, "1y": 365}
                     days = days_map.get(tariff_key.split("_")[1], 30)
                     
-                    await add_days(user_id, days, devices)
-                    await add_payment(user_id, price, name)
+                    # Создаем реального клиента в 3x-ui!
+                    vless_link = await create_vpn_client(user_id, devices)
                     
-                    user = await get_user(user_id)
-                    nick = f"@{user['username']}" if user and user['username'] else "без ника"
-                    await notify_payment_success(nick, user_id, name, price, devices)
-                    
-                    try:
-                        await bot.send_message(user_id, f"✅ <b>Оплата прошла успешно!</b>\nВаш тариф: {name}\n\n🔗 Ссылка для подключения:\n<code>https://vpn.example.com/sub_{user_id}</code>", parse_mode="HTML")
-                    except: pass
+                    if vless_link:
+                        await add_days(user_id, days, devices)
+                        await add_payment(user_id, price, name)
+                        user = await get_user(user_id)
+                        nick = f"@{user['username']}" if user and user['username'] else "без ника"
+                        await notify_payment_success(nick, user_id, name, price, devices)
+                        try:
+                            await bot.send_message(user_id, f"✅ <b>Оплата прошла успешно!</b>\nВаш тариф: {name}\n\n🔗 Ссылка для подключения:\n<code>{vless_link}</code>", parse_mode="HTML")
+                        except: pass
+                    else:
+                        await notify_urgent("Ошибка выдачи VPN", f"Юзер {user_id} оплатил, но ключ не создался.")
         
         return web.Response(text="OK")
-        
     except Exception as e:
         await notify_urgent("Ошибка вебхука", str(e))
         return web.Response(status=500, text="Error")
 
-# --- ДАЛЬШЕ АДМИНКА И ОСТАЛЬНЫЕ КНОПКИ БЕЗ ИЗМЕНЕНИЙ ---
+# --- АДМИНКА ---
 @dp.callback_query(F.data == "admin_panel")
 async def admin_panel(cb: CallbackQuery, state: FSMContext):
     await state.clear()
@@ -342,30 +465,18 @@ async def admin_panel(cb: CallbackQuery, state: FSMContext):
 @dp.callback_query(F.data == "admin_stats")
 async def admin_stats(cb: CallbackQuery):
     if not await is_admin(cb.from_user.id): return
-    tu, ts, tm, wm, _ = await get_stats()
-    text = (f"📊 <b>Статистика</b>\n\n👥 Юзеров: <b>{tu}</b>\n💎 Подписок: <b>{ts}</b>\n\n💰 <b>Финансы:</b>\nЗа всё время: <b>{tm} ₽</b>\nЗа 7 дней: <b>{wm} ₽</b>")
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🧪 Симулировать покупку", callback_data="admin_test_pay")],
-        [InlineKeyboardButton(text="💣 Вызвать ошибку", callback_data="admin_test_error")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_panel")]
-    ])
-    await cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    tu, ts, tm = await get_stats()
+    text = (f"📊 <b>Статистика</b>\n\n👥 Юзеров: <b>{tu}</b>\n💎 Подписок: <b>{ts}</b>\n💰 Выручка: <b>{tm} ₽</b>")
+    await cb.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_panel")]]))
     await cb.answer()
 
-@dp.callback_query(F.data == "admin_test_pay")
-async def admin_test_pay(cb: CallbackQuery):
+@dp.callback_query(F.data == "admin_logs")
+async def admin_logs(cb: CallbackQuery):
     if not await is_admin(cb.from_user.id): return
-    await add_payment(cb.from_user.id, 800, "3 мес · 6 устр.")
-    await add_days(cb.from_user.id, 90, 6)
-    await notify_payment_success("Админ (тест)", cb.from_user.id, "3 мес · 6 устр.", 800, 6)
-    await cb.answer("✅ Тестовая покупка записана!", show_alert=True)
-    await admin_stats(cb)
-
-@dp.callback_query(F.data == "admin_test_error")
-async def admin_test_error(cb: CallbackQuery):
-    if not await is_admin(cb.from_user.id): return
-    await cb.answer("Вызываю ошибку...", show_alert=True)
-    result = 1 / 0
+    logs = await get_logs()
+    text = "📝 <b>Последние 10 событий:</b>\n\n" + "".join([f"[{log['timestamp']}] {log['action']} (ID: {log['user_id']})\n{log['details']}\n\n" for log in logs])
+    await cb.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_panel")]]))
+    await cb.answer()
 
 @dp.callback_query(F.data.startswith("admin_users:"))
 async def admin_users(cb: CallbackQuery):
@@ -384,20 +495,6 @@ async def admin_users(cb: CallbackQuery):
     kb_buttons.append([InlineKeyboardButton(text="⬅️ В админку", callback_data="admin_panel")])
     await cb.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_buttons))
     await cb.answer()
-
-@dp.callback_query(F.data == "admin_add")
-async def admin_add(cb: CallbackQuery, state: FSMContext):
-    if cb.from_user.id != ADMIN_ID: return await cb.answer("Только главный админ!", show_alert=True)
-    await state.set_state(AdminStates.waiting_admin_id)
-    await cb.message.edit_text("🛡 Отправь ID нового админа.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="admin_panel")]]))
-    await cb.answer()
-
-@dp.message(AdminStates.waiting_admin_id)
-async def process_admin_id(msg: Message, state: FSMContext):
-    if msg.from_user.id != ADMIN_ID or not msg.text.isdigit(): return
-    async with db_pool.acquire() as conn: await conn.execute('INSERT INTO admins (user_id) VALUES ($1) ON CONFLICT DO NOTHING', int(msg.text))
-    await state.clear()
-    await msg.answer(f"✅ <code>{msg.text}</code> теперь админ!", parse_mode="HTML", reply_markup=admin_kb())
 
 @dp.callback_query(F.data == "admin_find_user")
 async def admin_find_user(cb: CallbackQuery, state: FSMContext):
@@ -421,8 +518,8 @@ async def show_user_card(message_obj, target_id):
     user = await get_user(target_id)
     if not user: return await message_obj.answer("❌ Не найден.")
     sub = f"До {datetime.datetime.fromisoformat(user['sub_until']).strftime('%d.%m.%Y')}" if user['sub_until'] else "Нет"
-    text = (f"👤 <b>Юзер</b>\nID: <code>{user['user_id']}</code>\nНик: @{user['username'] or '—'}\nСтатус: {'⛔️' if user['is_banned'] else '✅'}\nПодписка: {sub}\nУстройств: {user['devices_limit']}\nПробник: {'Да' if user['trial_used'] else 'Нет'}")
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎁 +30 дней", callback_data=f"adm_give:{target_id}")],[InlineKeyboardButton(text="⛔️ Забанить" if not user['is_banned'] else "✅ Разбанить", callback_data=f"adm_ban:{target_id}")],[InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_panel")]])
+    text = (f"👤 <b>Юзер</b>\nID: <code>{user['user_id']}</code>\nНик: @{user['username'] or '—'}\nПодписка: {sub}\nУстройств: {user['devices_limit']}")
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎁 +30 дней", callback_data=f"adm_give:{target_id}")],[InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_panel")]])
     if isinstance(message_obj, CallbackQuery): await message_obj.message.edit_text(text, parse_mode="HTML", reply_markup=kb); await message_obj.answer()
     else: await message_obj.answer(text, parse_mode="HTML", reply_markup=kb)
 
@@ -431,68 +528,6 @@ async def adm_give(cb: CallbackQuery):
     if not await is_admin(cb.from_user.id): return
     await add_days(int(cb.data.split(":")[1]), 30)
     await cb.answer("✅ Выдано 30 дней!", show_alert=True)
-
-@dp.callback_query(F.data.startswith("adm_ban:"))
-async def adm_ban(cb: CallbackQuery):
-    if not await is_admin(cb.from_user.id): return
-    target_id = int(cb.data.split(":")[1])
-    user = await get_user(target_id)
-    await toggle_ban(target_id, 0 if user['is_banned'] else 1)
-    await cb.answer("✅ Статус изменен!", show_alert=True)
-    await show_user_card(cb, target_id)
-
-@dp.callback_query(F.data == "profile")
-async def profile(cb: CallbackQuery):
-    user = await get_user(cb.from_user.id)
-    sub = f"✅ До {datetime.datetime.fromisoformat(user['sub_until']).strftime('%d.%m.%Y')}" if user['sub_until'] else "❌ Не активна"
-    await cb.message.edit_text(f"👤 <b>Профиль</b>\n\n🆔 ID: <code>{cb.from_user.id}</code>\n💎 Подписка: {sub}\n📱 Устройств: {user['devices_limit']}", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]]))
-    await cb.answer()
-
-@dp.callback_query(F.data == "trial")
-async def trial(cb: CallbackQuery):
-    user = await get_user(cb.from_user.id)
-    if user['trial_used'] == 1: return await cb.answer("❌ Вы уже использовали пробник!", show_alert=True)
-    await update_trial(cb.from_user.id)
-    await add_days(cb.from_user.id, 3, devices=3)
-    await cb.message.edit_text("🎁 <b>Пробный период активирован!</b>\n\n🔗 Ссылка: <code>https://vpn.example.com/trial</code>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]]))
-    await cb.answer()
-
-@dp.callback_query(F.data == "howto")
-async def howto(cb: CallbackQuery):
-    text = "📖 <b>Как подключиться?</b>\n\n1️⃣ Скачайте <b>Happ</b>.\n2️⃣ Скопируйте ссылку-ключ.\n3️⃣ Вставьте в Happ и нажмите «Подключиться»."
-    keyboard = [[InlineKeyboardButton(text="🍏 iOS", url="https://apps.apple.com/us/app/happ-proxy-utility/id6504287215")],[InlineKeyboardButton(text="🤖 Android", url="https://github.com/Happ-proxy/happ-android/releases/latest/download/Happ.apk")],[InlineKeyboardButton(text="💻 Windows", url="https://github.com/Happ-proxy/happ-desktop/releases")],[InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]]
-    await cb.message.edit_text(text, parse_mode="HTML", disable_web_page_preview=True, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
-    await cb.answer()
-
-@dp.callback_query(F.data == "ref")
-async def ref(cb: CallbackQuery):
-    bot_info = await bot.get_me()
-    await cb.message.edit_text(f"🤝 Пригласи друга:\n<code>https://t.me/{bot_info.username}?start={cb.from_user.id}</code>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]]))
-    await cb.answer()
-
-@dp.callback_query(F.data == "docs")
-async def docs(cb: CallbackQuery):
-    await cb.message.edit_text("ℹ️ <a href='https://telegra.ph/POLITIKA-KONFIDENCIALNOSTI-08-12-99'>Политика</a>\n📄 <a href='https://telegra.ph/PUBLICHNAYA-OFERTA-08-12-15'>Оферта</a>", parse_mode="HTML", disable_web_page_preview=True, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]]))
-    await cb.answer()
-
-@dp.callback_query(F.data == "support")
-async def support(cb: CallbackQuery):
-    await cb.message.edit_text("🆘 Поддержка: @wesksupport", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]]))
-    await cb.answer()
-
-@dp.callback_query(F.data == "back")
-async def back(cb: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await cb.message.edit_text("Главное меню:", reply_markup=await main_kb(cb.from_user.id))
-    await cb.answer()
-
-@dp.callback_query(F.data == "admin_logs")
-async def admin_logs(cb: CallbackQuery):
-    if not await is_admin(cb.from_user.id): return
-    logs = await get_logs()
-    text = "📝 <b>Последние 10 событий:</b>\n\n" + "".join([f"[{log['timestamp']}] {log['action']} (ID: {log['user_id']})\n{log['details']}\n\n" for log in logs])
-    await cb.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_panel")]]))
-    await cb.answer()
 
 @dp.callback_query(F.data == "admin_broadcast")
 async def admin_broadcast(cb: CallbackQuery, state: FSMContext):
@@ -519,22 +554,18 @@ async def process_broadcast(msg: Message, state: FSMContext):
 # --- ЗАПУСК ---
 async def on_startup(bot: Bot):
     global db_pool
-    print("Подключение к Supabase...")
     db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
     await init_db()
     if WEBHOOK_URL: await bot.set_webhook(WEBHOOK_URL)
-    print("Бот успешно подключен к внешней базе!")
-    await notify_bot.send_message(ADMIN_ID, "✅ <b>Бот успешно перезапущен!</b>", parse_mode="HTML")
+    await notify_bot.send_message(ADMIN_ID, "✅ <b>Бот перезапущен и готов к работе!</b>", parse_mode="HTML")
 
 async def main():
     app = web.Application()
     webhook_requests_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
     webhook_requests_handler.register(app, path=WEBHOOK_PATH)
     setup_application(app, dp, bot=bot)
-    
     app.router.add_post("/rollypay_webhook", rollypay_webhook)
     app.router.add_get("/", lambda r: web.Response(text="Bot is alive!"))
-    
     dp.startup.register(on_startup)
     
     runner = web.AppRunner(app)
