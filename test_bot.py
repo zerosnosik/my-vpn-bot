@@ -2,6 +2,7 @@ import asyncio
 import os
 import datetime
 import asyncpg
+from typing import Union
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandObject
@@ -13,6 +14,7 @@ from aiogram.dispatcher.event.bases import SkipHandler
 
 # --- Настройки ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+NOTIFY_BOT_TOKEN = os.getenv("NOTIFY_BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 DATABASE_URL = os.getenv("DATABASE_URL")
 WEBHOOK_HOST = os.getenv("RENDER_EXTERNAL_URL")
@@ -21,8 +23,9 @@ WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}" if WEBHOOK_HOST else None
 PORT = int(os.getenv("PORT", 10000))
 
 bot = Bot(token=BOT_TOKEN)
+notify_bot = Bot(token=NOTIFY_BOT_TOKEN) if NOTIFY_BOT_TOKEN else bot
 dp = Dispatcher()
-db_pool = None # Глобальный пул соединений
+db_pool = None 
 
 TARIFFS = {
     "1m": ("1 мес · 3 устр.", 200),
@@ -31,7 +34,36 @@ TARIFFS = {
     "1y": ("1 год · 5 устр. 🔥 -42%", 1400),
 }
 
-# --- БАЗА ДАННЫХ (PostgreSQL / asyncpg) ---
+# --- ФУНКЦИИ УВЕДОМЛЕНИЙ ---
+async def notify_payment_success(nick, user_id, tariff, price):
+    text = (
+        f"👑 <b>ПОЗДРАВЛЯЮ, БОСС!</b> 🎉\n\n"
+        f"👤 Клиент: <b>{nick}</b> (ID: <code>{user_id}</code>)\n"
+        f"💎 Купил у вас подписку на <b>{tariff}</b>!\n"
+        f"💰 Сумма: <b>{price} ₽</b>\n\n"
+        f"📈 <i>WeskVPN становится только сильнее. Так держать!</i>"
+    )
+    try:
+        await notify_bot.send_message(ADMIN_ID, text, parse_mode="HTML")
+    except Exception: pass
+
+async def notify_urgent(title: str, details: str):
+    text = (
+        f"🚨🚨🚨 <b>СРОЧНОЕ УВЕДОМЛЕНИЕ!</b> 🚨🚨🚨\n\n"
+        f"⚠️ <b>{title.upper()}</b> ⚠️\n\n"
+        f"📝 <b>ДЕТАЛИ:</b>\n<code>{details[:300]}</code>\n\n"
+        f"🛠 <i>ТРЕБУЕТСЯ ТВОЕ ВНИМАНИЕ!</i>"
+    )
+    try:
+        await notify_bot.send_message(ADMIN_ID, text, parse_mode="HTML")
+    except Exception: pass
+
+async def notify_info(text: str):
+    try:
+        await notify_bot.send_message(ADMIN_ID, text, parse_mode="HTML")
+    except Exception: pass
+
+# --- БАЗА ДАННЫХ ---
 async def init_db():
     async with db_pool.acquire() as conn:
         await conn.execute('''
@@ -160,6 +192,17 @@ def consent_kb():
         [InlineKeyboardButton(text="✅ Согласен с условиями", callback_data="consent_agree")]
     ])
 
+# --- ГЛОБАЛЬНЫЙ ЛОВЕЦ ОШИБОК ---
+@dp.error()
+async def error_handler(event: Union[Message, CallbackQuery], exception: Exception):
+    error_details = f"Тип: {type(exception).__name__}\nТекст: {str(exception)}"
+    await notify_urgent("ОШИБКА В БОТЕ", error_details)
+    
+    if isinstance(event, CallbackQuery):
+        try:
+            await event.answer("Произошла техническая ошибка. Мы уже чиним!", show_alert=True)
+        except: pass
+
 # --- ПРОВЕРКА НА БАН ---
 @dp.callback_query()
 async def check_ban(cb: CallbackQuery):
@@ -186,7 +229,7 @@ async def start(msg: Message, command: CommandObject, state: FSMContext):
             "🔒 <b>Какие данные мы собираем:</b>\n"
             "• Telegram ID (для управления подпиской)\n"
             "• Никнейм (для связи с поддержкой)\n\n"
-            "🚫 <b>Мы НЕ собираем:</b> ваши номера телефонов, ФИО или данные банковских карт.\n\n"
+            "🚫 <b>Мы НЕ собираем:</b> ваши номера телефонов, ФИО или данные карт.\n\n"
             "Нажимая кнопку ниже, вы подтверждаете согласие с нашей Политикой конфиденциальности."
         )
         await msg.answer(consent_text, parse_mode="HTML", reply_markup=consent_kb())
@@ -208,6 +251,10 @@ async def start(msg: Message, command: CommandObject, state: FSMContext):
 @dp.callback_query(F.data == "consent_agree")
 async def consent_agree(cb: CallbackQuery):
     await add_user(cb.from_user.id, cb.from_user.username)
+    
+    nick = f"@{cb.from_user.username}" if cb.from_user.username else "без ника"
+    await notify_info(f"🆕 <b>Новый пользователь!</b>\nНик: {nick}\nID: <code>{cb.from_user.id}</code>")
+    
     await cb.message.edit_text(
         f"Отлично! Добро пожаловать в WeskVPN, {cb.from_user.first_name}. 👋",
         reply_markup=await main_kb(cb.from_user.id)
@@ -234,9 +281,10 @@ async def admin_stats(cb: CallbackQuery):
             f"💰 <b>Финансы:</b>\n"
             f"За всё время: <b>{tm} ₽</b>\n"
             f"За 7 дней: <b>{wm} ₽</b> ({ws} покупок)\n\n"
-            f"<i>(Кнопка симуляции покупки ниже нужна для теста)</i>")
+            f"<i>(Кнопки ниже для теста уведомлений)</i>")
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🧪 Симулировать покупку (тест)", callback_data="admin_test_pay")],
+        [InlineKeyboardButton(text="🧪 Симулировать покупку", callback_data="admin_test_pay")],
+        [InlineKeyboardButton(text="💣 Вызвать ошибку (тест)", callback_data="admin_test_error")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_panel")]
     ])
     await cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
@@ -245,10 +293,20 @@ async def admin_stats(cb: CallbackQuery):
 @dp.callback_query(F.data == "admin_test_pay")
 async def admin_test_pay(cb: CallbackQuery):
     if not await is_admin(cb.from_user.id): return
-    await add_payment(cb.from_user.id, 500, "3m")
+    await add_payment(cb.from_user.id, 450, "3 мес · 3 устр.")
     await add_days(cb.from_user.id, 90)
-    await cb.answer("✅ Тестовая покупка на 500₽ записана!", show_alert=True)
+    
+    nick = f"@{cb.from_user.username}" if cb.from_user.username else "Админ"
+    await notify_payment_success(nick, cb.from_user.id, "3 мес · 3 устр.", 450)
+    
+    await cb.answer("✅ Тестовая покупка на 450₽ записана!", show_alert=True)
     await admin_stats(cb)
+
+@dp.callback_query(F.data == "admin_test_error")
+async def admin_test_error(cb: CallbackQuery):
+    if not await is_admin(cb.from_user.id): return
+    await cb.answer("Вызываю ошибку...", show_alert=True)
+    result = 1 / 0 # Специальная ошибка для проверки
 
 @dp.callback_query(F.data.startswith("admin_users:"))
 async def admin_users(cb: CallbackQuery):
@@ -359,7 +417,7 @@ async def adm_ban(cb: CallbackQuery):
     await cb.answer("✅ Статус изменен!", show_alert=True)
     await show_user_card(cb, target_id)
 
-# --- ОСТАЛЬНОЕ ---
+# --- ПОЛЬЗОВАТЕЛЬСКИЕ КНОПКИ ---
 @dp.callback_query(F.data == "profile")
 async def profile(cb: CallbackQuery):
     user = await get_user(cb.from_user.id)
@@ -384,7 +442,7 @@ async def howto(cb: CallbackQuery):
         "📖 <b>Как подключиться к WeskVPN?</b>\n\n"
         "1️⃣ Скачайте приложение <b>Happ</b> для вашего устройства (ссылки ниже).\n"
         "2️⃣ Скопируйте ссылку-ключ, которую выдал вам бот.\n"
-        "3️⃣ Откройте Happ, нажмите «+» (Добавить) и вставьте скопированную ссылку.\n"
+        "3️⃣ Откройте Happ, нажмите «+» и вставьте скопированную ссылку.\n"
         "4️⃣ Нажмите «Подключиться» и пользуйтесь!\n\n"
         "🔗 <b>Скачать Happ:</b>"
     )
@@ -424,7 +482,13 @@ async def pay(cb: CallbackQuery):
 @dp.callback_query(F.data.startswith("agree:"))
 async def agree(cb: CallbackQuery):
     key = cb.data.split(":")[1]
+    name, price = TARIFFS[key]
+    
     await cb.message.edit_text(f"💳 <b>Переход к оплате...</b>\n\n⚙️ <i>Прием платежей временно настраивается (ждем RollyPay).</i>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В меню", callback_data="back")]]))
+    
+    nick = f"@{cb.from_user.username}" if cb.from_user.username else "без ника"
+    await notify_payment_success(nick, cb.from_user.id, name, price)
+    
     await cb.answer()
 
 @dp.callback_query(F.data == "docs")
@@ -488,6 +552,8 @@ async def on_startup(bot: Bot):
     if WEBHOOK_URL:
         await bot.set_webhook(WEBHOOK_URL)
     print("Бот успешно подключен к внешней базе!")
+    
+    await notify_info("✅ <b>Бот успешно перезапущен!</b>\nВсе системы работают в штатном режиме.")
 
 async def main():
     app = web.Application()
