@@ -22,6 +22,7 @@ NOTIFY_BOT_TOKEN = os.getenv("NOTIFY_BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 DATABASE_URL = os.getenv("DATABASE_URL")
 ROLLYPAY_API_KEY = os.getenv("ROLLYPAY_API_KEY")
+ROLLYPAY_TERMINAL_ID = os.getenv("ROLLYPAY_TERMINAL_ID")
 ROLLYPAY_SIGNING_SECRET = os.getenv("ROLLYPAY_SIGNING_SECRET")
 WEBHOOK_HOST = os.getenv("RENDER_EXTERNAL_URL")
 WEBHOOK_PATH = "/webhook"
@@ -253,7 +254,6 @@ async def agree(cb: CallbackQuery):
     
     await cb.message.edit_text("⏳ <b>Создаем ссылку на оплату...</b>", parse_mode="HTML")
     
-    # Генерируем уникальный nonce (время в миллисекундах)
     nonce = str(int(datetime.datetime.now().timestamp() * 1000))
     
     headers = {
@@ -261,21 +261,24 @@ async def agree(cb: CallbackQuery):
         "X-Nonce": nonce,
         "Content-Type": "application/json"
     }
+    
     payload = {
-        "amount": price,
+        "terminal_id": ROLLYPAY_TERMINAL_ID,
+        "amount": f"{price}.00",
+        "payment_currency": "RUB",
         "order_id": f"user_{cb.from_user.id}_tariff_{key}",
         "description": f"VPN {name}",
         "payment_method": "sbp", 
         "customer_id": str(cb.from_user.id),
-        "redirect_url": "https://t.me/weskvpn_bot" 
+        "redirect_url": "https://t.me/weskvpn_bot"
     }
     
     try:
         async with ClientSession() as session:
-            async with session.post("https://api.rollypay.io/v1/payments", headers=headers, json=payload) as response:
+            async with session.post("https://api.rollypay.io/api/v1/payments", headers=headers, json=payload) as response:
                 if response.status in [200, 201]:
                     data = await response.json()
-                    pay_url = data.get("pay_url") or data.get("url")
+                    pay_url = data.get("pay_url")
                     if pay_url:
                         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💳 Перейти к оплате", url=pay_url)],[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back")]])
                         await cb.message.edit_text(f"Тариф: <b>{name}</b>\nСумма: <b>{price} ₽</b>\n\nНажмите кнопку ниже для оплаты.", parse_mode="HTML", reply_markup=kb)
@@ -284,7 +287,7 @@ async def agree(cb: CallbackQuery):
                 else:
                     error_text = await response.text()
                     await notify_urgent("Ошибка RollyPay API", f"Код: {response.status}\n{error_text}")
-                    await cb.message.edit_text("❌ Ошибка создания платежа. Мы уже чиним!")
+                    await cb.message.edit_text(f"❌ Ошибка платежной системы. Попробуйте позже.")
     except Exception as e:
         await notify_urgent("Критическая ошибка RollyPay", str(e))
         await cb.message.edit_text("❌ Ошибка соединения с платежной системой.")
