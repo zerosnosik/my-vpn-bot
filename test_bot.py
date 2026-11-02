@@ -55,7 +55,7 @@ TARIFFS = {
     "9_1y": ("1 год · 9 устр. 🔥 -42%", 3500, 9),
 }
 
-# --- ИНТЕГРАЦИЯ С 3X-UI (ИСПРАВЛЕНЫ ПУТИ API) ---
+# --- ИНТЕГРАЦИЯ С 3X-UI ---
 async def create_vpn_client(user_id, devices, days):
     if not XUI_URL or not XUI_API_TOKEN:
         return None, "XUI_URL или XUI_API_TOKEN не заданы"
@@ -79,12 +79,11 @@ async def create_vpn_client(user_id, devices, days):
                 if not inbounds:
                     return None, "Нет созданных Inbounds!"
                 
-                target_inbound = inbounds[0] # Берем первый (TCP Reality)
+                target_inbound = inbounds[0]
                 inbound_id = target_inbound["id"]
                 port = target_inbound["port"]
                 remark = target_inbound.get("remark", "WeskVPN")
                 
-                # Парсим настройки Reality (исправлено для dict/str)
                 stream_settings_raw = target_inbound["streamSettings"]
                 if isinstance(stream_settings_raw, str):
                     stream_settings = json.loads(stream_settings_raw)
@@ -99,7 +98,7 @@ async def create_vpn_client(user_id, devices, days):
         except Exception as e:
             return None, f"Ошибка запроса Inbounds: {str(e)}"
 
-        # 2. Создаем клиента (НОВЫЙ ПУТЬ ДЛЯ 3X-UI v3)
+        # 2. Создаем клиента
         client_uuid = str(uuid.uuid4())
         email = f"user_{user_id}"
         expiry_time = int((time.time() + days * 24 * 60 * 60) * 1000)
@@ -110,7 +109,7 @@ async def create_vpn_client(user_id, devices, days):
                 "flow": "xtls-rprx-vision",
                 "email": email,
                 "limitIp": devices,
-                "totalGB": 0, # 0 = безлимит
+                "totalGB": 0,
                 "expiryTime": expiry_time,
                 "enable": True,
                 "tgId": str(user_id),
@@ -121,14 +120,12 @@ async def create_vpn_client(user_id, devices, days):
         }
 
         try:
-            # Используем актуальный эндпоинт /panel/api/clients/add
             async with session.post(f"{base_url}/panel/api/clients/add", headers=headers, json=client_data) as resp:
                 if resp.status == 200:
                     res_json = await resp.json()
                     if not res_json.get("success"):
                         return None, f"Ошибка добавления: {res_json}"
                         
-                    # Формируем настоящую ссылку
                     vless_link = (
                         f"vless://{client_uuid}@{SERVER_IP}:{port}"
                         f"?type=tcp&security=reality&pbk={public_key}&fp={fingerprint}"
@@ -508,4 +505,11 @@ async def adm_give(cb: CallbackQuery):
     await add_days(int(cb.data.split(":")[1]), 30)
     await cb.answer("✅ Выдано 30 дней!", show_alert=True)
 
-@dp.callback_query(F
+@dp.callback_query(F.data == "admin_broadcast")
+async def admin_broadcast(cb: CallbackQuery, state: FSMContext):
+    if not await is_admin(cb.from_user.id): return
+    await state.set_state(AdminStates.waiting_broadcast)
+    await cb.message.edit_text("📢 Отправь текст для рассылки.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="admin_panel")]]))
+    await cb.answer()
+
+@dp.message(AdminStates
