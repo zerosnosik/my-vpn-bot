@@ -55,7 +55,7 @@ TARIFFS = {
     "9_1y": ("1 год · 9 устр. 🔥 -42%", 3500, 9),
 }
 
-# --- ИНТЕГРАЦИЯ С 3X-UI (ЧЕРЕЗ API ТОКЕН) ---
+# --- ИНТЕГРАЦИЯ С 3X-UI (ИСПРАВЛЕНЫ ПУТИ API) ---
 async def create_vpn_client(user_id, devices, days):
     if not XUI_URL or not XUI_API_TOKEN:
         return None, "XUI_URL или XUI_API_TOKEN не заданы"
@@ -99,31 +99,30 @@ async def create_vpn_client(user_id, devices, days):
         except Exception as e:
             return None, f"Ошибка запроса Inbounds: {str(e)}"
 
-        # 2. Создаем клиента
+        # 2. Создаем клиента (НОВЫЙ ПУТЬ ДЛЯ 3X-UI v3)
         client_uuid = str(uuid.uuid4())
         email = f"user_{user_id}"
         expiry_time = int((time.time() + days * 24 * 60 * 60) * 1000)
 
         client_data = {
-            "id": inbound_id,
-            "settings": json.dumps({
-                "clients": [{
-                    "id": client_uuid,
-                    "flow": "xtls-rprx-vision",
-                    "email": email,
-                    "limitIp": devices,
-                    "totalGB": 0, # 0 = безлимит
-                    "expiryTime": expiry_time,
-                    "enable": True,
-                    "tgId": str(user_id),
-                    "subId": client_uuid[:16],
-                    "reset": 0
-                }]
-            })
+            "client": {
+                "id": client_uuid,
+                "flow": "xtls-rprx-vision",
+                "email": email,
+                "limitIp": devices,
+                "totalGB": 0, # 0 = безлимит
+                "expiryTime": expiry_time,
+                "enable": True,
+                "tgId": str(user_id),
+                "subId": client_uuid[:16],
+                "reset": 0
+            },
+            "inboundIds": [inbound_id]
         }
 
         try:
-            async with session.post(f"{base_url}/panel/api/inbounds/addClient", headers=headers, json=client_data) as resp:
+            # Используем актуальный эндпоинт /panel/api/clients/add
+            async with session.post(f"{base_url}/panel/api/clients/add", headers=headers, json=client_data) as resp:
                 if resp.status == 200:
                     res_json = await resp.json()
                     if not res_json.get("success"):
@@ -509,51 +508,4 @@ async def adm_give(cb: CallbackQuery):
     await add_days(int(cb.data.split(":")[1]), 30)
     await cb.answer("✅ Выдано 30 дней!", show_alert=True)
 
-@dp.callback_query(F.data == "admin_broadcast")
-async def admin_broadcast(cb: CallbackQuery, state: FSMContext):
-    if not await is_admin(cb.from_user.id): return
-    await state.set_state(AdminStates.waiting_broadcast)
-    await cb.message.edit_text("📢 Отправь текст для рассылки.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="admin_panel")]]))
-    await cb.answer()
-
-@dp.message(AdminStates.waiting_broadcast)
-async def process_broadcast(msg: Message, state: FSMContext):
-    if not await is_admin(msg.from_user.id): return
-    await state.clear()
-    await msg.answer("⏳ Начинаю рассылку...")
-    async with db_pool.acquire() as conn: users = await conn.fetch('SELECT user_id FROM users WHERE is_banned = 0')
-    success, failed = 0, 0
-    for user in users:
-        try:
-            await bot.send_message(user['user_id'], msg.text, parse_mode="HTML")
-            success += 1
-            await asyncio.sleep(0.05)
-        except: failed += 1
-    await msg.answer(f"✅ Доставлено: {success}\n🚫 Ошибок: {failed}", parse_mode="HTML", reply_markup=admin_kb())
-
-# --- ЗАПУСК ---
-async def on_startup(bot: Bot):
-    global db_pool
-    db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
-    await init_db()
-    if WEBHOOK_URL: await bot.set_webhook(WEBHOOK_URL)
-    await notify_bot.send_message(ADMIN_ID, "✅ <b>Бот перезапущен и готов к работе!</b>", parse_mode="HTML")
-
-async def main():
-    app = web.Application()
-    webhook_requests_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
-    webhook_requests_handler.register(app, path=WEBHOOK_PATH)
-    setup_application(app, dp, bot=bot)
-    app.router.add_post("/rollypay_webhook", rollypay_webhook)
-    app.router.add_get("/", lambda r: web.Response(text="Bot is alive!"))
-    dp.startup.register(on_startup)
-    
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-    print("Бот запущен!")
-    await asyncio.Event().wait()
-
-if __name__ == "__main__":
-    asyncio.run(main())
+@dp.callback_query(F
