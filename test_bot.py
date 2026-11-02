@@ -34,9 +34,9 @@ notify_bot = Bot(token=NOTIFY_BOT_TOKEN) if NOTIFY_BOT_TOKEN else bot
 dp = Dispatcher()
 db_pool = None 
 
-# --- МАТРИЦА ТАРИФОВ (Первый тариф тестовый за 10₽) ---
+# --- МАТРИЦА ТАРИФОВ (Не забудь потом поменять 10 на 200!) ---
 TARIFFS = {
-    "3_1m": ("1 мес · 3 устр. (ТЕСТ 10₽)", 10, 3), 
+    "3_1m": ("1 мес · 3 устр.", 200, 3), 
     "3_3m": ("3 мес · 3 устр. 🔥 -25%", 450, 3),
     "3_6m": ("6 мес · 3 устр. 🔥 -33%", 800, 3), 
     "3_1y": ("1 год · 3 устр. 🔥 -42%", 1400, 3),
@@ -238,17 +238,9 @@ async def show_tariffs(cb: CallbackQuery):
     await cb.message.edit_text(f"🔌 <b>Тарифы для {dev_count} устройств:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await cb.answer()
 
+# --- ОПЛАТА (ИНТЕГРАЦИЯ ROLLYPAY) ---
 @dp.callback_query(F.data.startswith("pay:"))
 async def pay(cb: CallbackQuery):
-    key = cb.data.split(":")[1]
-    name, price, devices = TARIFFS[key]
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Согласен с офертой", callback_data=f"agree:{key}")],[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"dev_{devices}")]])
-    await cb.message.edit_text(f"Вы выбрали: <b>{name}</b>\nСумма: <b>{price} ₽</b>\n\nСогласны с офертой?", parse_mode="HTML", reply_markup=kb)
-    await cb.answer()
-
-# --- ОПЛАТА (ИНТЕГРАЦИЯ ROLLYPAY) ---
-@dp.callback_query(F.data.startswith("agree:"))
-async def agree(cb: CallbackQuery):
     key = cb.data.split(":")[1]
     name, price, devices = TARIFFS[key]
     
@@ -262,7 +254,6 @@ async def agree(cb: CallbackQuery):
         "Content-Type": "application/json"
     }
     
-    # ВАЖНО: Используем двоеточие в order_id, чтобы не ломать ключи тарифов
     payload = {
         "terminal_id": ROLLYPAY_TERMINAL_ID,
         "amount": f"{price}.00",
@@ -281,8 +272,14 @@ async def agree(cb: CallbackQuery):
                     data = await response.json()
                     pay_url = data.get("pay_url")
                     if pay_url:
-                        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💳 Перейти к оплате", url=pay_url)],[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back")]])
-                        await cb.message.edit_text(f"Тариф: <b>{name}</b>\nСумма: <b>{price} ₽</b>\n\nНажмите кнопку ниже для оплаты.", parse_mode="HTML", reply_markup=kb)
+                        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💳 Оплатить (СБП)", url=pay_url)],[InlineKeyboardButton(text="⬅️ Отмена", callback_data="back")]])
+                        # Изменили текст: добавили согласие с офертой прямо в сообщение
+                        await cb.message.edit_text(
+                            f"Тариф: <b>{name}</b>\n"
+                            f"Сумма: <b>{price} ₽</b>\n\n"
+                            f"<i>Нажимая кнопку ниже, вы соглашаетесь с условиями оферты.</i>", 
+                            parse_mode="HTML", reply_markup=kb
+                        )
                     else:
                         await cb.message.edit_text("❌ Ошибка: RollyPay не вернул ссылку.")
                 else:
@@ -306,13 +303,11 @@ async def rollypay_webhook(request: web.Request):
         status = data.get("status")
         order_id = data.get("order_id", "")
         
-        # Обрабатываем успешную оплату
         if status in ["succeeded", "success", "paid"] or event_type in ["payment.succeeded", "payment.paid"]:
-            # Используем двоеточие для разделения
             parts = order_id.split(":")
             if len(parts) >= 4:
                 user_id = int(parts[1])
-                tariff_key = parts[3] # Получаем целый ключ, например "3_1m"
+                tariff_key = parts[3]
                 
                 if tariff_key in TARIFFS:
                     name, price, devices = TARIFFS[tariff_key]
@@ -330,14 +325,13 @@ async def rollypay_webhook(request: web.Request):
                         await bot.send_message(user_id, f"✅ <b>Оплата прошла успешно!</b>\nВаш тариф: {name}\n\n🔗 Ссылка для подключения:\n<code>https://vpn.example.com/sub_{user_id}</code>", parse_mode="HTML")
                     except: pass
         
-        # Отвечаем 200 OK, чтобы RollyPay перестал повторять
         return web.Response(text="OK")
         
     except Exception as e:
         await notify_urgent("Ошибка вебхука", str(e))
         return web.Response(status=500, text="Error")
 
-# --- АДМИН ПАНЕЛЬ ---
+# --- ДАЛЬШЕ АДМИНКА И ОСТАЛЬНЫЕ КНОПКИ БЕЗ ИЗМЕНЕНИЙ ---
 @dp.callback_query(F.data == "admin_panel")
 async def admin_panel(cb: CallbackQuery, state: FSMContext):
     await state.clear()
@@ -447,7 +441,6 @@ async def adm_ban(cb: CallbackQuery):
     await cb.answer("✅ Статус изменен!", show_alert=True)
     await show_user_card(cb, target_id)
 
-# --- ПОЛЬЗОВАТЕЛЬСКИЕ КНОПКИ ---
 @dp.callback_query(F.data == "profile")
 async def profile(cb: CallbackQuery):
     user = await get_user(cb.from_user.id)
