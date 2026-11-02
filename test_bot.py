@@ -33,14 +33,20 @@ notify_bot = Bot(token=NOTIFY_BOT_TOKEN) if NOTIFY_BOT_TOKEN else bot
 dp = Dispatcher()
 db_pool = None 
 
-# --- МАТРИЦА ТАРИФОВ ---
+# --- МАТРИЦА ТАРИФОВ (Первый тариф тестовый за 10₽) ---
 TARIFFS = {
-    "3_1m": ("1 мес · 3 устр.", 200, 3), "3_3m": ("3 мес · 3 устр. 🔥 -25%", 450, 3),
-    "3_6m": ("6 мес · 3 устр. 🔥 -33%", 800, 3), "3_1y": ("1 год · 3 устр. 🔥 -42%", 1400, 3),
-    "6_1m": ("1 мес · 6 устр.", 350, 6), "6_3m": ("3 мес · 6 устр. 🔥 -24%", 800, 6),
-    "6_6m": ("6 мес · 6 устр. 🔥 -33%", 1400, 6), "6_1y": ("1 год · 6 устр. 🔥 -40%", 2500, 6),
-    "9_1m": ("1 мес · 9 устр.", 500, 9), "9_3m": ("3 мес · 9 устр. 🔥 -20%", 1200, 9),
-    "9_6m": ("6 мес · 9 устр. 🔥 -33%", 2000, 9), "9_1y": ("1 год · 9 устр. 🔥 -42%", 3500, 9),
+    "3_1m": ("1 мес · 3 устр. (ТЕСТ 10₽)", 10, 3), 
+    "3_3m": ("3 мес · 3 устр. 🔥 -25%", 450, 3),
+    "3_6m": ("6 мес · 3 устр. 🔥 -33%", 800, 3), 
+    "3_1y": ("1 год · 3 устр. 🔥 -42%", 1400, 3),
+    "6_1m": ("1 мес · 6 устр.", 350, 6), 
+    "6_3m": ("3 мес · 6 устр. 🔥 -24%", 800, 6),
+    "6_6m": ("6 мес · 6 устр. 🔥 -33%", 1400, 6), 
+    "6_1y": ("1 год · 6 устр. 🔥 -40%", 2500, 6),
+    "9_1m": ("1 мес · 9 устр.", 500, 9), 
+    "9_3m": ("3 мес · 9 устр. 🔥 -20%", 1200, 9),
+    "9_6m": ("6 мес · 9 устр. 🔥 -33%", 2000, 9), 
+    "9_1y": ("1 год · 9 устр. 🔥 -42%", 3500, 9),
 }
 
 # --- ФУНКЦИИ УВЕДОМЛЕНИЙ ---
@@ -245,20 +251,29 @@ async def agree(cb: CallbackQuery):
     key = cb.data.split(":")[1]
     name, price, devices = TARIFFS[key]
     
-    await cb.message.edit_text("⏳ <b>Создаем ссылку на оплату...</b>")
+    await cb.message.edit_text("⏳ <b>Создаем ссылку на оплату...</b>", parse_mode="HTML")
     
-    headers = {"X-API-Key": ROLLYPAY_API_KEY, "Content-Type": "application/json"}
+    # Генерируем уникальный nonce (время в миллисекундах)
+    nonce = str(int(datetime.datetime.now().timestamp() * 1000))
+    
+    headers = {
+        "X-API-Key": ROLLYPAY_API_KEY,
+        "X-Nonce": nonce,
+        "Content-Type": "application/json"
+    }
     payload = {
         "amount": price,
         "order_id": f"user_{cb.from_user.id}_tariff_{key}",
         "description": f"VPN {name}",
-        "callback_url": "https://my-vpn-bot-3d6j.onrender.com/rollypay_webhook"
+        "payment_method": "sbp", 
+        "customer_id": str(cb.from_user.id),
+        "redirect_url": "https://t.me/weskvpn_bot" 
     }
     
     try:
         async with ClientSession() as session:
             async with session.post("https://api.rollypay.io/v1/payments", headers=headers, json=payload) as response:
-                if response.status == 200 or response.status == 201:
+                if response.status in [200, 201]:
                     data = await response.json()
                     pay_url = data.get("pay_url") or data.get("url")
                     if pay_url:
@@ -282,7 +297,7 @@ async def rollypay_webhook(request: web.Request):
         body = await request.text()
         signature = request.headers.get("X-Signature")
         
-        # Проверка подписи (безопасность)
+        # Проверка подписи
         if ROLLYPAY_SIGNING_SECRET and signature:
             expected_sig = hmac.new(ROLLYPAY_SIGNING_SECRET.encode(), body.encode(), hashlib.sha256).hexdigest()
             if not hmac.compare_digest(expected_sig, signature):
@@ -292,7 +307,6 @@ async def rollypay_webhook(request: web.Request):
         status = data.get("status")
         order_id = data.get("order_id", "")
         
-        # Если оплата успешна
         if status == "succeeded" or status == "success":
             parts = order_id.split("_")
             if len(parts) >= 4:
@@ -301,8 +315,6 @@ async def rollypay_webhook(request: web.Request):
                 
                 if tariff_key in TARIFFS:
                     name, price, devices = TARIFFS[tariff_key]
-                    
-                    # Начисляем дни (1м=30, 3м=90, 6м=180, 1г=365)
                     days_map = {"1m": 30, "3m": 90, "6m": 180, "1y": 365}
                     days = days_map.get(tariff_key.split("_")[1], 30)
                     
@@ -314,7 +326,6 @@ async def rollypay_webhook(request: web.Request):
                     await notify_payment_success(nick, user_id, name, price, devices)
                     
                     try:
-                        # Отправляем сообщение клиенту об успехе
                         await bot.send_message(user_id, f"✅ <b>Оплата прошла успешно!</b>\nВаш тариф: {name}\n\n🔗 Ссылка для подключения:\n<code>https://vpn.example.com/sub_{user_id}</code>", parse_mode="HTML")
                     except: pass
         
@@ -525,7 +536,6 @@ async def main():
     webhook_requests_handler.register(app, path=WEBHOOK_PATH)
     setup_application(app, dp, bot=bot)
     
-    # Добавляем роут для RollyPay!
     app.router.add_post("/rollypay_webhook", rollypay_webhook)
     app.router.add_get("/", lambda r: web.Response(text="Bot is alive!"))
     
