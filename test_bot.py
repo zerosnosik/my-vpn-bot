@@ -27,8 +27,8 @@ ROLLYPAY_API_KEY = os.getenv("ROLLYPAY_API_KEY")
 ROLLYPAY_TERMINAL_ID = os.getenv("ROLLYPAY_TERMINAL_ID")
 ROLLYPAY_SIGNING_SECRET = os.getenv("ROLLYPAY_SIGNING_SECRET")
 XUI_URL = os.getenv("XUI_URL")
-XUI_USERNAME = os.getenv("XUI_USERNAME")
-XUI_PASSWORD = os.getenv("XUI_PASSWORD")
+XUI_API_TOKEN = os.getenv("XUI_API_TOKEN")
+SERVER_IP = os.getenv("SERVER_IP", "127.0.0.1") 
 WEBHOOK_HOST = os.getenv("RENDER_EXTERNAL_URL")
 WEBHOOK_PATH = "/webhook"
 WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}" if WEBHOOK_HOST else None
@@ -39,7 +39,7 @@ notify_bot = Bot(token=NOTIFY_BOT_TOKEN) if NOTIFY_BOT_TOKEN else bot
 dp = Dispatcher()
 db_pool = None 
 
-# --- МАТРИЦА ТАРИФОВ (Оставил тестовый за 10₽) ---
+# --- МАТРИЦА ТАРИФОВ (ТЕСТ 10₽) ---
 TARIFFS = {
     "3_1m": ("1 мес · 3 устр. (ТЕСТ 10₽)", 10, 3), 
     "3_3m": ("3 мес · 3 устр. 🔥 -25%", 450, 3),
@@ -55,75 +55,49 @@ TARIFFS = {
     "9_1y": ("1 год · 9 устр. 🔥 -42%", 3500, 9),
 }
 
-# --- ФУНКЦИИ УВЕДОМЛЕНИЙ ---
-async def notify_payment_success(nick, user_id, tariff, price, devices):
-    text = (
-        f"👑 <b>ПОЗДРАВЛЯЮ, БОСС!</b> 🎉\n\n"
-        f"👤 Клиент: <b>{nick}</b> (ID: <code>{user_id}</code>)\n"
-        f"💎 Купил подписку: <b>{tariff}</b>\n"
-        f"📱 Устройств: <b>{devices}</b>\n"
-        f"💰 Сумма: <b>{price} ₽</b>\n\n"
-        f"📈 <i>WeskVPN растет!</i>"
-    )
-    try: await notify_bot.send_message(ADMIN_ID, text, parse_mode="HTML")
-    except: pass
-
-async def notify_urgent(title: str, details: str):
-    text = f"🚨 <b>ОШИБКА: {title.upper()}</b> 🚨\n\n<code>{details[:300]}</code>"
-    try: await notify_bot.send_message(ADMIN_ID, text, parse_mode="HTML")
-    except: pass
-
-# --- ИНТЕГРАЦИЯ С 3X-UI ---
-async def create_vpn_client(user_id, devices):
-    """Авторизуется в 3x-ui и создает клиента, возвращает ссылку"""
-    if not XUI_URL or not XUI_USERNAME or not XUI_PASSWORD:
-        return None
+# --- ИНТЕГРАЦИЯ С 3X-UI (ЧЕРЕЗ API ТОКЕН) ---
+async def create_vpn_client(user_id, devices, days):
+    if not XUI_URL or not XUI_API_TOKEN:
+        return None, "XUI_URL или XUI_API_TOKEN не заданы"
 
     base_url = XUI_URL.rstrip('/')
-    
-    # 1. Авторизация
-    login_url = f"{base_url}/login"
-    login_data = {"username": XUI_USERNAME, "password": XUI_PASSWORD}
+    headers = {"Authorization": f"Bearer {XUI_API_TOKEN}"}
     
     async with ClientSession() as session:
+        # 1. Получаем список инбаундов
         try:
-            async with session.post(login_url, json=login_data) as resp:
+            async with session.get(f"{base_url}/panel/api/inbounds/list", headers=headers) as resp:
                 if resp.status != 200:
-                    await notify_urgent("3x-ui Login Error", f"Status: {resp.status}")
-                    return None
-                # Куки сохраняются в сессии автоматически
-        except Exception as e:
-            await notify_urgent("3x-ui Connection Error", str(e))
-            return None
-
-        # 2. Получаем список инбаундов, чтобы найти ID первого (VLESS TCP)
-        try:
-            async with session.get(f"{base_url}/panel/api/inbounds/list") as resp:
+                    error_text = await resp.text()
+                    return None, f"HTTP {resp.status}: {error_text}"
+                
                 data = await resp.json()
                 if not data.get("success"):
-                    return None
+                    return None, f"API Error: {data}"
                 
                 inbounds = data.get("obj", [])
                 if not inbounds:
-                    await notify_urgent("3x-ui Error", "Нет созданных Inbounds!")
-                    return None
+                    return None, "Нет созданных Inbounds!"
                 
-                # Берем первый инбаунд (обычно это TCP Reality)
-                target_inbound = inbounds[0]
+                target_inbound = inbounds[0] # Берем первый (TCP Reality)
                 inbound_id = target_inbound["id"]
-                protocol = target_inbound["protocol"]
                 port = target_inbound["port"]
-                remark = target_inbound["remark"] # Название (WeskVPN | Германия)
+                remark = target_inbound.get("remark", "WeskVPN")
+                
+                # Парсим настройки Reality для ссылки
+                stream_settings = json.loads(target_inbound["streamSettings"])
+                reality = stream_settings.get("realitySettings", {})
+                public_key = reality.get("settings", {}).get("publicKey", "")
+                short_id = reality.get("shortIds", [""])[0]
+                sni = reality.get("serverNames", [""])[0]
+                fingerprint = reality.get("settings", {}).get("fingerprint", "chrome")
         except Exception as e:
-            await notify_urgent("3x-ui Get Inbounds Error", str(e))
-            return None
+            return None, f"Ошибка запроса Inbounds: {str(e)}"
 
-        # 3. Создаем клиента
+        # 2. Создаем клиента
         client_uuid = str(uuid.uuid4())
         email = f"user_{user_id}"
-        expiry_time = int((time.time() + 30 * 24 * 60 * 60) * 1000) # +30 дней
-        total_gb = 0 # 0 = безлимит
-        limit_ip = devices # Количество устройств
+        expiry_time = int((time.time() + days * 24 * 60 * 60) * 1000)
 
         client_data = {
             "id": inbound_id,
@@ -132,8 +106,8 @@ async def create_vpn_client(user_id, devices):
                     "id": client_uuid,
                     "flow": "xtls-rprx-vision",
                     "email": email,
-                    "limitIp": limit_ip,
-                    "totalGB": total_gb,
+                    "limitIp": devices,
+                    "totalGB": 0, # 0 = безлимит
                     "expiryTime": expiry_time,
                     "enable": True,
                     "tgId": str(user_id),
@@ -144,34 +118,25 @@ async def create_vpn_client(user_id, devices):
         }
 
         try:
-            async with session.post(f"{base_url}/panel/api/inbounds/addClient", json=client_data) as resp:
+            async with session.post(f"{base_url}/panel/api/inbounds/addClient", headers=headers, json=client_data) as resp:
                 if resp.status == 200:
-                    # Формируем ссылку для подключения
-                    # Берем данные для Reality из настроек инбаунда
-                    stream_settings = json.loads(target_inbound["streamSettings"])
-                    reality_settings = stream_settings.get("realitySettings", {})
-                    server_names = reality_settings.get("serverNames", [])
-                    public_key = reality_settings.get("settings", {}).get("publicKey", "")
-                    short_id = reality_settings.get("shortIds", [""])[0]
-                    fingerprint = reality_settings.get("settings", {}).get("fingerprint", "chrome")
-                    
-                    # Получаем домен/IP сервера из XUI_URL
-                    server_host = base_url.replace("https://", "").replace("http://", "").split(":")[0]
-
+                    res_json = await resp.json()
+                    if not res_json.get("success"):
+                        return None, f"Ошибка добавления: {res_json}"
+                        
+                    # Формируем настоящую ссылку
                     vless_link = (
-                        f"vless://{client_uuid}@{server_host}:{port}"
+                        f"vless://{client_uuid}@{SERVER_IP}:{port}"
                         f"?type=tcp&security=reality&pbk={public_key}&fp={fingerprint}"
-                        f"&sni={server_names[0] if server_names else ''}&sid={short_id}&spx=%2F&flow=xtls-rprx-vision"
-                        f"#{remark}-{email}"
+                        f"&sni={sni}&sid={short_id}&spx=%2F&flow=xtls-rprx-vision"
+                        f"#{remark}-{user_id}"
                     )
-                    return vless_link
+                    return vless_link, None
                 else:
                     error = await resp.text()
-                    await notify_urgent("3x-ui Add Client Error", error)
-                    return None
+                    return None, f"HTTP {resp.status}: {error}"
         except Exception as e:
-            await notify_urgent("3x-ui Add Client Exception", str(e))
-            return None
+            return None, f"Ошибка добавления клиента: {str(e)}"
 
 # --- БАЗА ДАННЫХ ---
 async def init_db():
@@ -230,10 +195,22 @@ async def add_payment(user_id, amount, tariff):
 
 async def get_stats():
     async with db_pool.acquire() as conn:
-        total_users = await conn.fetchval('SELECT COUNT(*) FROM users')
-        total_subs = await conn.fetchval('SELECT COUNT(*) FROM users WHERE sub_until > $1', datetime.datetime.now().isoformat())
-        total_money = await conn.fetchval('SELECT SUM(amount) FROM payments') or 0
-        return total_users, total_subs, total_money
+        tu = await conn.fetchval('SELECT COUNT(*) FROM users')
+        ts = await conn.fetchval('SELECT COUNT(*) FROM users WHERE sub_until > $1', datetime.datetime.now().isoformat())
+        tm = await conn.fetchval('SELECT SUM(amount) FROM payments') or 0
+        return tu, ts, tm
+
+# --- УВЕДОМЛЕНИЯ ---
+async def notify_payment_success(nick, user_id, tariff, price, devices):
+    text = (f"👑 <b>ПОЗДРАВЛЯЮ, БОСС!</b> 🎉\n\n👤 Клиент: <b>{nick}</b> (ID: <code>{user_id}</code>)\n"
+            f"💎 Купил подписку: <b>{tariff}</b>\n📱 Устройств: <b>{devices}</b>\n💰 Сумма: <b>{price} ₽</b>")
+    try: await notify_bot.send_message(ADMIN_ID, text, parse_mode="HTML")
+    except: pass
+
+async def notify_urgent(title: str, details: str):
+    text = f"🚨 <b>ОШИБКА: {title.upper()}</b> 🚨\n\n<code>{details[:300]}</code>"
+    try: await notify_bot.send_message(ADMIN_ID, text, parse_mode="HTML")
+    except: pass
 
 # --- СОСТОЯНИЯ (FSM) ---
 class AdminStates(StatesGroup):
@@ -280,7 +257,7 @@ async def error_handler(event: ErrorEvent):
         try: await event.update.callback_query.answer("Техническая ошибка. Мы чиним!", show_alert=True)
         except: pass
 
-# --- ГЛАВНЫЙ ХЕНДЛЕР ---
+# --- ХЕНДЛЕРЫ ---
 @dp.message(Command("start"))
 async def start(msg: Message, command: CommandObject, state: FSMContext):
     await state.clear()
@@ -307,7 +284,6 @@ async def consent_agree(cb: CallbackQuery):
     await cb.message.edit_text(f"Отлично! Добро пожаловать в WeskVPN, {cb.from_user.first_name}. 👋", reply_markup=await main_kb(cb.from_user.id))
     await cb.answer()
 
-# --- ПОЛЬЗОВАТЕЛЬСКИЕ КНОПКИ ---
 @dp.callback_query(F.data == "profile")
 async def profile(cb: CallbackQuery):
     user = await get_user(cb.from_user.id)
@@ -321,10 +297,10 @@ async def trial(cb: CallbackQuery):
     if user['trial_used'] == 1: return await cb.answer("❌ Вы уже использовали пробник!", show_alert=True)
     
     await cb.message.edit_text("⏳ Создаем ключ...")
+    vless_link, error = await create_vpn_client(cb.from_user.id, 3, 3)
     
-    # Создаем реальный ключ на 3 дня и 3 устройства
-    vless_link = await create_vpn_client(cb.from_user.id, 3)
-    if not vless_link:
+    if error:
+        await notify_urgent("Ошибка выдачи ключа", error)
         return await cb.message.edit_text("❌ Ошибка сервера. Мы уже чиним!")
         
     await update_trial(cb.from_user.id)
@@ -414,7 +390,7 @@ async def agree(cb: CallbackQuery):
         await cb.message.edit_text("❌ Ошибка соединения.")
     await cb.answer()
 
-# --- ВЕБХУК ROLLYPAY ---
+# --- ВЕБХУК ---
 async def rollypay_webhook(request: web.Request):
     try:
         raw_body = await request.read()
@@ -434,8 +410,7 @@ async def rollypay_webhook(request: web.Request):
                     days_map = {"1m": 30, "3m": 90, "6m": 180, "1y": 365}
                     days = days_map.get(tariff_key.split("_")[1], 30)
                     
-                    # Создаем реального клиента в 3x-ui!
-                    vless_link = await create_vpn_client(user_id, devices)
+                    vless_link, error = await create_vpn_client(user_id, devices, days)
                     
                     if vless_link:
                         await add_days(user_id, days, devices)
@@ -447,7 +422,7 @@ async def rollypay_webhook(request: web.Request):
                             await bot.send_message(user_id, f"✅ <b>Оплата прошла успешно!</b>\nВаш тариф: {name}\n\n🔗 Ссылка для подключения:\n<code>{vless_link}</code>", parse_mode="HTML")
                         except: pass
                     else:
-                        await notify_urgent("Ошибка выдачи VPN", f"Юзер {user_id} оплатил, но ключ не создался.")
+                        await notify_urgent("Ошибка выдачи VPN", f"Юзер {user_id} оплатил, но ключ не создался. Ошибка: {error}")
         
         return web.Response(text="OK")
     except Exception as e:
