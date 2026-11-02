@@ -67,7 +67,7 @@ async def notify_urgent(title: str, details: str):
     text = (
         f"🚨🚨🚨 <b>СРОЧНОЕ УВЕДОМЛЕНИЕ!</b> 🚨🚨🚨\n\n"
         f"⚠️ <b>{title.upper()}</b> ⚠️\n\n"
-        f"📝 <b>ДЕТАЛИ:</b>\n<code>{details[:300]}</code>\n\n"
+        f"📝 <b>ДЕТАЛИ:</b>\n<code>{details[:350]}</code>\n\n"
         f"🛠 <i>ТРЕБУЕТСЯ ТВОЕ ВНИМАНИЕ!</i>"
     )
     try: await notify_bot.send_message(ADMIN_ID, text, parse_mode="HTML")
@@ -294,32 +294,44 @@ async def agree(cb: CallbackQuery):
     
     await cb.answer()
 
-# --- ВЕБХУК ROLLYPAY (ИСПРАВЛЕНА ПРОВЕРКА ПОДПИСИ) ---
+# --- ВЕБХУК ROLLYPAY (ЖЕСТКАЯ ПРОВЕРКА ПОДПИСИ) ---
 async def rollypay_webhook(request: web.Request):
     try:
-        # 1. Получаем сырое тело запроса и заголовки
+        # 1. Получаем сырые байты тела (это критично для HMAC)
         raw_body = await request.read()
-        body_text = raw_body.decode('utf-8')
         
+        # 2. Получаем заголовки
         signature = request.headers.get("X-Signature")
-        timestamp = request.headers.get("X-Timestamp")
+        timestamp = request.headers.get("X-Timestamp") # или X-Signature-Timestamp
         
-        # 2. Проверка подписи (timestamp + "." + body)
+        # 3. Проверяем подпись
         if ROLLYPAY_SIGNING_SECRET and signature and timestamp:
-            payload_to_sign = f"{timestamp}.{body_text}"
-            expected_sig = hmac.new(ROLLYPAY_SIGNING_SECRET.encode(), payload_to_sign.encode(), hashlib.sha256).hexdigest()
+            # RollyPay использует алгоритм: timestamp + "." + raw_body
+            payload_to_sign = f"{timestamp}.".encode('utf-8') + raw_body
+            expected_sig = hmac.new(
+                ROLLYPAY_SIGNING_SECRET.encode('utf-8'),
+                payload_to_sign,
+                hashlib.sha256
+            ).hexdigest()
             
-            if not hmac.compare_digest(expected_sig, signature):
-                await notify_urgent("Неверная подпись вебхука", f"Timestamp: {timestamp}")
+            # Если подпись не совпала, шлем уведомление тебе и отклоняем запрос
+            if not hmac.compare_digest(expected_sig.lower(), signature.lower()):
+                await notify_urgent(
+                    "Неверная подпись вебхука", 
+                    f"Timestamp: {timestamp}\n"
+                    f"Получено: {signature[:20]}...\n"
+                    f"Ожидалось: {expected_sig[:20]}...\n"
+                    f"Секрет (первые 5): {ROLLYPAY_SIGNING_SECRET[:5]}..."
+                )
                 return web.Response(status=403, text="Invalid signature")
         
-        # 3. Парсим JSON и обрабатываем событие
-        data = json.loads(body_text)
+        # 4. Если подпись верна (или секрет не задан), парсим JSON
+        data = json.loads(raw_body.decode('utf-8'))
         event_type = data.get("event_type")
         status = data.get("status")
         order_id = data.get("order_id", "")
         
-        # Если оплата успешна
+        # 5. Если оплата успешна
         if status in ["succeeded", "success"] or event_type in ["payment.succeeded", "payment.paid"]:
             parts = order_id.split("_")
             if len(parts) >= 4:
@@ -342,7 +354,7 @@ async def rollypay_webhook(request: web.Request):
                         await bot.send_message(user_id, f"✅ <b>Оплата прошла успешно!</b>\nВаш тариф: {name}\n\n🔗 Ссылка для подключения:\n<code>https://vpn.example.com/sub_{user_id}</code>", parse_mode="HTML")
                     except: pass
         
-        # Отвечаем RollyPay 200 OK, чтобы он перестал повторять запрос
+        # Отвечаем RollyPay 200 OK, чтобы он перестал спамить
         return web.Response(text="OK")
         
     except Exception as e:
