@@ -294,23 +294,33 @@ async def agree(cb: CallbackQuery):
     
     await cb.answer()
 
-# --- ВЕБХУК ROLLYPAY (ПРИЕМ СИГНАЛА ОБ ОПЛАТЕ) ---
+# --- ВЕБХУК ROLLYPAY (ИСПРАВЛЕНА ПРОВЕРКА ПОДПИСИ) ---
 async def rollypay_webhook(request: web.Request):
     try:
-        body = await request.text()
-        signature = request.headers.get("X-Signature")
+        # 1. Получаем сырое тело запроса и заголовки
+        raw_body = await request.read()
+        body_text = raw_body.decode('utf-8')
         
-        # Проверка подписи
-        if ROLLYPAY_SIGNING_SECRET and signature:
-            expected_sig = hmac.new(ROLLYPAY_SIGNING_SECRET.encode(), body.encode(), hashlib.sha256).hexdigest()
+        signature = request.headers.get("X-Signature")
+        timestamp = request.headers.get("X-Timestamp")
+        
+        # 2. Проверка подписи (timestamp + "." + body)
+        if ROLLYPAY_SIGNING_SECRET and signature and timestamp:
+            payload_to_sign = f"{timestamp}.{body_text}"
+            expected_sig = hmac.new(ROLLYPAY_SIGNING_SECRET.encode(), payload_to_sign.encode(), hashlib.sha256).hexdigest()
+            
             if not hmac.compare_digest(expected_sig, signature):
+                await notify_urgent("Неверная подпись вебхука", f"Timestamp: {timestamp}")
                 return web.Response(status=403, text="Invalid signature")
         
-        data = json.loads(body)
+        # 3. Парсим JSON и обрабатываем событие
+        data = json.loads(body_text)
+        event_type = data.get("event_type")
         status = data.get("status")
         order_id = data.get("order_id", "")
         
-        if status == "succeeded" or status == "success":
+        # Если оплата успешна
+        if status in ["succeeded", "success"] or event_type in ["payment.succeeded", "payment.paid"]:
             parts = order_id.split("_")
             if len(parts) >= 4:
                 user_id = int(parts[1])
@@ -332,7 +342,9 @@ async def rollypay_webhook(request: web.Request):
                         await bot.send_message(user_id, f"✅ <b>Оплата прошла успешно!</b>\nВаш тариф: {name}\n\n🔗 Ссылка для подключения:\n<code>https://vpn.example.com/sub_{user_id}</code>", parse_mode="HTML")
                     except: pass
         
+        # Отвечаем RollyPay 200 OK, чтобы он перестал повторять запрос
         return web.Response(text="OK")
+        
     except Exception as e:
         await notify_urgent("Ошибка вебхука", str(e))
         return web.Response(status=500, text="Error")
