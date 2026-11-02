@@ -512,7 +512,6 @@ async def admin_broadcast(cb: CallbackQuery, state: FSMContext):
     await cb.message.edit_text("📢 Отправь текст для рассылки.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data="admin_panel")]]))
     await cb.answer()
 
-waiting_broadcast)
 async def process_broadcast(msg: Message, state: FSMContext):
     if not await is_admin(msg.from_user.id): return
     await state.clear()
