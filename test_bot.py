@@ -84,8 +84,13 @@ async def create_vpn_client(user_id, devices, days):
                 port = target_inbound["port"]
                 remark = target_inbound.get("remark", "WeskVPN")
                 
-                # Парсим настройки Reality для ссылки
-                stream_settings = json.loads(target_inbound["streamSettings"])
+                # Парсим настройки Reality (исправлено для dict/str)
+                stream_settings_raw = target_inbound["streamSettings"]
+                if isinstance(stream_settings_raw, str):
+                    stream_settings = json.loads(stream_settings_raw)
+                else:
+                    stream_settings = stream_settings_raw
+                    
                 reality = stream_settings.get("realitySettings", {})
                 public_key = reality.get("settings", {}).get("publicKey", "")
                 short_id = reality.get("shortIds", [""])[0]
