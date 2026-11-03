@@ -66,7 +66,7 @@ async def create_vpn_client(user_id, devices, days):
     async with ClientSession() as session:
         # 1. Получаем список инбаундов
         try:
-        async with session.get(f"{base_url}/MoR8wX291hKgtJ8M/panel/api/inbounds/list", headers=headers) as resp: 
+    async with session.get(f"{base_url}/MoR8wX291hKgtJ8M/panel/api/inbounds/list", headers=headers) as resp: 
                 if resp.status != 200:
                     error_text = await resp.text()
                     return None, f"HTTP {resp.status}: {error_text}"
