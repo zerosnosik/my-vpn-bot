@@ -66,7 +66,7 @@ async def create_vpn_client(user_id, devices, days):
     async with ClientSession() as session:
         # 1. Получаем список инбаундов
         try:
-            async with session.get(f"{base_url}/panel/api/inbounds/list", headers=headers) as resp:
+            async with session.get(f"{base_url}/MoR8wX291hKgtJ8M/panel/api/inbounds/list", headers=headers) as resp:
                 if resp.status != 200:
                     error_text = await resp.text()
                     return None, f"HTTP {resp.status}: {error_text}"
@@ -98,7 +98,7 @@ async def create_vpn_client(user_id, devices, days):
         except Exception as e:
             return None, f"Ошибка запроса Inbounds: {str(e)}"
 
-        # 2. Создаем клиента
+        # 2. Создаем клиента (НОВЫЙ ПУТЬ: clients/add)
         client_uuid = str(uuid.uuid4())
         email = f"user_{user_id}"
         expiry_time = int((time.time() + days * 24 * 60 * 60) * 1000)
@@ -120,7 +120,7 @@ async def create_vpn_client(user_id, devices, days):
         }
 
         try:
-            async with session.post(f"{base_url}/panel/api/inbounds/addClient", headers=headers, json=client_data) as resp:
+            async with session.post(f"{base_url}/MoR8wX291hKgtJ8M/panel/api/clients/add", headers=headers, json=client_data) as resp:
                 if resp.status == 200:
                     res_json = await resp.json()
                     if not res_json.get("success"):
