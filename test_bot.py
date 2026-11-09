@@ -127,7 +127,7 @@ async def create_vpn_client(user_id, devices, days):
                         return None, f"Ошибка добавления: {res_json}"
                         
                     vless_link = (
-                        f"vless://{client_uuid}@{SERVER_IP}:{port}"
+                        f"vless://{client_uuid}@{SERVER_IP}:443"
                         f"?type=tcp&security=reality&pbk={public_key}&fp={fingerprint}"
                         f"&sni={sni}&sid={short_id}&spx=%2F&flow=xtls-rprx-vision"
                         f"#{remark}-{user_id}"
