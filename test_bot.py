@@ -55,7 +55,7 @@ TARIFFS = {
     "9_1y": ("1 год · 9 устр. 🔥 -42%", 3500, 9),
 }
 
-# --- ИНТЕГРАЦИЯ С 3X-UI (ИСПРАВЛЕННЫЕ ОТСТУПЫ) ---
+# --- ИНТЕГРАЦИЯ С 3X-UI ---
 async def create_vpn_client(user_id, devices, days):
     if not XUI_URL or not XUI_API_TOKEN:
         return None, "XUI_URL или XUI_API_TOKEN не заданы"
@@ -81,26 +81,13 @@ async def create_vpn_client(user_id, devices, days):
                 
                 target_inbound = inbounds[0]
                 inbound_id = target_inbound["id"]
-                port = target_inbound["port"]
                 remark = target_inbound.get("remark", "WeskVPN")
-                
-                stream_settings_raw = target_inbound["streamSettings"]
-                if isinstance(stream_settings_raw, str):
-                    stream_settings = json.loads(stream_settings_raw)
-                else:
-                    stream_settings = stream_settings_raw
-                    
-                reality = stream_settings.get("realitySettings", {})
-                public_key = reality.get("settings", {}).get("publicKey", "")
-                short_id = reality.get("shortIds", [""])[0]
-                sni = reality.get("serverNames", [""])[0]
-                fingerprint = reality.get("settings", {}).get("fingerprint", "chrome")
         except Exception as e:
             return None, f"Ошибка запроса Inbounds: {str(e)}"
 
-        # 2. Создаем клиента (НОВЫЙ ПУТЬ: clients/add)
+        # 2. Создаем клиента
         client_uuid = str(uuid.uuid4())
-        email = f"user_{user_id}"
+        email = f"user_{user_id}_{int(time.time())}"
         expiry_time = int((time.time() + days * 24 * 60 * 60) * 1000)
 
         client_data = {
@@ -126,13 +113,12 @@ async def create_vpn_client(user_id, devices, days):
                     if not res_json.get("success"):
                         return None, f"Ошибка добавления: {res_json}"
                         
-                    vless_link = (
-                                           # Формируем ссылку на подписку (чтобы Happ видел трафик и срок)
+                    # Ссылка на подписку с трафиком и сроком
                     sub_id = client_uuid[:16]
                     subscription_link = f"https://{SERVER_IP}:25528/519jdz22xizynnil/{sub_id}"
                     
                     return subscription_link, None
-                                                       else:
+                else:
                     error = await resp.text()
                     return None, f"HTTP {resp.status}: {error}"
         except Exception as e:
