@@ -112,7 +112,7 @@ async def create_vpn_client(user_id, devices, days):
                 "totalGB": 0,
                 "expiryTime": expiry_time,
                 "enable": True,
-                "tgId": str(user_id),
+                "tgId": user_id,
                 "subId": client_uuid[:16],
                 "reset": 0
             },
