@@ -127,13 +127,12 @@ async def create_vpn_client(user_id, devices, days):
                         return None, f"Ошибка добавления: {res_json}"
                         
                     vless_link = (
-                        f"vless://{client_uuid}@{SERVER_IP}:443"
-                        f"?type=tcp&security=reality&pbk={public_key}&fp={fingerprint}"
-                        f"&sni={sni}&sid={short_id}&spx=%2F&flow=xtls-rprx-vision"
-                        f"#{remark}-{user_id}"
-                    )
-                    return vless_link, None
-                else:
+                                           # Формируем ссылку на подписку (чтобы Happ видел трафик и срок)
+                    sub_id = client_uuid[:16]
+                    subscription_link = f"https://{SERVER_IP}:25528/519jdz22xizynnil/{sub_id}"
+                    
+                    return subscription_link, None
+                                                       else:
                     error = await resp.text()
                     return None, f"HTTP {resp.status}: {error}"
         except Exception as e:
