@@ -55,7 +55,7 @@ TARIFFS = {
     "9_1y": ("1 год · 9 устр. 🔥 -42%", 3500, 9),
 }
 
-# --- ИНТЕГРАЦИЯ С 3X-UI ---
+# --- ИНТЕГРАЦИЯ С 3X-UI (ПРЯМАЯ ССЫЛКА) ---
 async def create_vpn_client(user_id, devices, days):
     if not XUI_URL or not XUI_API_TOKEN:
         return None, "XUI_URL или XUI_API_TOKEN не заданы"
@@ -84,7 +84,7 @@ async def create_vpn_client(user_id, devices, days):
                 port = target_inbound["port"]
                 remark = target_inbound.get("remark", "WeskVPN")
                 
-                # Достаем ключи Reality для правильной ссылки
+                # Достаем ключи Reality
                 stream_settings_raw = target_inbound["streamSettings"]
                 if isinstance(stream_settings_raw, str):
                     stream_settings = json.loads(stream_settings_raw)
@@ -95,13 +95,13 @@ async def create_vpn_client(user_id, devices, days):
                 public_key = reality.get("settings", {}).get("publicKey", "")
                 short_id = reality.get("shortIds", [""])[0]
                 sni = reality.get("serverNames", [""])[0]
-                fingerprint = reality.get("settings", {}).get("fingerprint", "chrome")
+                fingerprint = reality.get("settings", {}).get("fingerprint", "firefox")
         except Exception as e:
             return None, f"Ошибка запроса Inbounds: {str(e)}"
 
         # 2. Создаем клиента
         client_uuid = str(uuid.uuid4())
-        email = f"user_{user_id}_{int(time.time())}" # Уникальный email
+        email = f"user_{user_id}_{int(time.time())}"
         expiry_time = int((time.time() + days * 24 * 60 * 60) * 1000)
 
         client_data = {
@@ -113,7 +113,7 @@ async def create_vpn_client(user_id, devices, days):
                 "totalGB": 0,
                 "expiryTime": expiry_time,
                 "enable": True,
-                "tgId": user_id, # ЦЕЛОЕ ЧИСЛО, без кавычек
+                "tgId": user_id,
                 "subId": client_uuid[:16],
                 "reset": 0
             },
@@ -127,7 +127,7 @@ async def create_vpn_client(user_id, devices, days):
                     if not res_json.get("success"):
                         return None, f"Ошибка добавления: {res_json}"
                         
-                    # ПРЯМАЯ ССЫЛКА VLESS
+                    # ПРЯМАЯ ССЫЛКА VLESS (порт 443, fp=firefox)
                     vless_link = (
                         f"vless://{client_uuid}@{SERVER_IP}:443"
                         f"?type=tcp&security=reality&pbk={public_key}&fp={fingerprint}"
@@ -532,26 +532,42 @@ async def process_broadcast(msg: Message, state: FSMContext):
 # --- ЗАПУСК ---
 async def on_startup(bot: Bot):
     global db_pool
-    db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
+    print("1. Подключение к базе данных...")
+    try:
+        db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
+        print("2. База данных подключена!")
+    except Exception as e:
+        print(f"!!! ОШИБКА БАЗЫ ДАННЫХ: {e}")
+        return
+
+    print("3. Создание таблиц...")
     await init_db()
-    if WEBHOOK_URL: await bot.set_webhook(WEBHOOK_URL)
+    print("4. Установка вебхука...")
+    
+    if WEBHOOK_URL: 
+        await bot.set_webhook(WEBHOOK_URL)
+        print("5. Вебхук установлен!")
+        
     await notify_bot.send_message(ADMIN_ID, "✅ <b>Бот перезапущен и готов к работе!</b>", parse_mode="HTML")
+    print("6. Бот полностью запущен!")
 
 async def main():
     app = web.Application()
     webhook_requests_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
     webhook_requests_handler.register(app, path=WEBHOOK_PATH)
     setup_application(app, dp, bot=bot)
+    
     app.router.add_post("/rollypay_webhook", rollypay_webhook)
     app.router.add_get("/", lambda r: web.Response(text="Bot is alive!"))
+    
     dp.startup.register(on_startup)
     
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
-    print("Бот запущен!")
+    print("Сервер запущен на порту", PORT)
     await asyncio.Event().wait()
- 
-    if __name__ == "__main__":
-        asyncio.run(main())
+
+if __name__ == "__main__":
+    asyncio.run(main())
