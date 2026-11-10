@@ -552,8 +552,6 @@ async def main():
     await site.start()
     print("Бот запущен!")
     await asyncio.Event().wait()
+ 
     if __name__ == "__main__":
-    asyncio.run(main())
-
-if __name__ == "__main__":
-    asyncio.run(main())
+        asyncio.run(main())
