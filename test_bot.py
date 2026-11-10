@@ -79,7 +79,14 @@ async def create_vpn_client(user_id, devices, days):
                 if not inbounds:
                     return None, "Нет созданных Inbounds!"
                 
-                target_inbound = inbounds[0]
+                                # Ищем именно наш TCP-сервер, а не первый попавшийся
+                target_inbound = None
+                for inb in inbounds:
+                    if "WeskVPN" in inb.get("remark", ""):
+                        target_inbound = inb
+                        break
+                if not target_inbound:
+                    target_inbound = inbounds[0]
                 inbound_id = target_inbound["id"]
                 port = target_inbound["port"]
                 remark = target_inbound.get("remark", "WeskVPN")
